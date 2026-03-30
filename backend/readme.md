@@ -1,0 +1,1 @@
+activare venv: `.\.venv\Scripts\Activate.ps1`
