@@ -24,3 +24,5 @@ dist-ssr
 *.sw?
 
 .venv
+.env
+users.json
