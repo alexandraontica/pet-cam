@@ -8,6 +8,12 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "../components/tabs";
 import { PawPrint, Heart, Camera } from "lucide-react";
 import { toast } from "sonner";
 
+type User = {
+  name: string;
+  username: string;
+  password: string;
+};
+
 export function Auth() {
   const navigate = useNavigate();
   const [loginUsername, setLoginUsername] = useState("");
@@ -20,8 +26,8 @@ export function Auth() {
     e.preventDefault();
     
     // Mock authentication - check if user exists
-    const users = JSON.parse(localStorage.getItem("petcam_users") || "[]");
-    const user = users.find((u: any) => u.username === loginUsername && u.password === loginPassword);
+    const users = JSON.parse(localStorage.getItem("petcam_users") || "[]") as User[];
+    const user = users.find((u) => u.username === loginUsername && u.password === loginPassword);
     
     if (user) {
       localStorage.setItem("petcam_current_user", JSON.stringify(user));
@@ -36,10 +42,10 @@ export function Auth() {
     e.preventDefault();
     
     // Mock registration
-    const users = JSON.parse(localStorage.getItem("petcam_users") || "[]");
+    const users = JSON.parse(localStorage.getItem("petcam_users") || "[]") as User[];
     
     // Check if user already exists
-    if (users.find((u: any) => u.username === registerUsername)) {
+    if (users.find((u) => u.username === registerUsername)) {
       toast.error("Username already taken!");
       return;
     }

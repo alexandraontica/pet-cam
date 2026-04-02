@@ -18,9 +18,15 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+type CurrentUser = {
+  name: string;
+  username: string;
+  password: string;
+};
+
 export function CameraStream() {
   const navigate = useNavigate();
-  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [isStreaming, setIsStreaming] = useState(true);
   const [motionDetection, setMotionDetection] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
