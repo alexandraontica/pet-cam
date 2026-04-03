@@ -15,6 +15,10 @@ import {
   Minimize2,
   Bell,
   Settings,
+  ArrowUp,
+  ArrowDown,
+  ArrowLeft,
+  ArrowRight,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -124,6 +128,31 @@ export function CameraStream() {
     }
   };
 
+  const handleCameraMove = async (direction: "up" | "down" | "left" | "right") => {
+    try {
+      const response = await fetch("/api/camera/move", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "include",
+        body: JSON.stringify({ direction }),
+      });
+
+      const data = (await response.json()) as { message?: string };
+      if (!response.ok) {
+        toast.error(data.message || "Could not send camera command.");
+        return;
+      }
+
+      toast.info(`Move camera ${direction}`);
+    } catch {
+      toast.error("Could not reach backend camera controls endpoint.");
+    }
+  };
+
+  const controlButtonClass = "cursor-pointer border-zinc-900 bg-transparent text-zinc-900 hover:bg-black/5";
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-pink-50 via-purple-50 to-blue-50">
       {/* Header */}
@@ -168,9 +197,9 @@ export function CameraStream() {
                   </Badge>
                 </div>
               </CardHeader>
-              <CardContent className="p-0">
-                <div ref={streamContainerRef} className="bg-black">
-                  <div className={`relative bg-gray-900 ${isFullscreen ? "h-[calc(100vh-3rem)]" : "aspect-video"}`}>
+              <CardContent className="p-0 [&:last-child]:pb-0">
+                <div ref={streamContainerRef} className={`bg-black ${isFullscreen ? "h-screen flex flex-col" : ""}`}>
+                  <div className={`relative bg-gray-900 ${isFullscreen ? "flex-1 min-h-0" : "aspect-video"}`}>
                     {isStreaming ? (
                       <>
                         <img
@@ -202,34 +231,93 @@ export function CameraStream() {
 
                   {/* Controls */}
                   <div
-                    className={`bg-gradient-to-r from-pink-100 to-purple-100 flex items-center justify-center ${
-                      isFullscreen ? "p-2 gap-2" : "p-4 gap-4"
+                    className={`bg-gradient-to-r from-pink-100 to-purple-100 border-t border-purple-100 ${
+                      isFullscreen ? "p-2 shrink-0" : "p-3"
                     }`}
                   >
-                    <Button
-                      onClick={toggleStream}
-                      size={isFullscreen ? "sm" : "lg"}
-                      className={
-                        isStreaming
-                          ? "bg-gradient-to-r from-pink-400 to-purple-500 hover:from-pink-500 hover:to-purple-600"
-                          : "bg-gray-400 hover:bg-gray-500"
-                      }
-                    >
-                      {isStreaming ? (
-                        <>
-                          <Video className="size-5 mr-2" />
-                          Pause
-                        </>
-                      ) : (
-                        <>
-                          <VideoOff className="size-5 mr-2" />
-                          Resume
-                        </>
-                      )}
-                    </Button>
-                    <Button onClick={handleFullscreen} variant="outline" size={isFullscreen ? "sm" : "lg"}>
-                      {isFullscreen ? <Minimize2 className="size-5" /> : <Maximize2 className="size-5" />}
-                    </Button>
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="w-32 flex justify-start">
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={toggleStream}
+                          size={isFullscreen ? "sm" : "default"}
+                          className={controlButtonClass}
+                        >
+                          {isStreaming ? (
+                            <>
+                              <Video className="size-4 mr-2" />
+                              Pause
+                            </>
+                          ) : (
+                            <>
+                              <VideoOff className="size-4 mr-2" />
+                              Resume
+                            </>
+                          )}
+                        </Button>
+                      </div>
+
+                      <div className="grid grid-cols-3 gap-1.5 w-[132px]">
+                        <div />
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleCameraMove("up")}
+                          aria-label="Move camera up"
+                          className={controlButtonClass}
+                        >
+                          <ArrowUp className="size-4" />
+                        </Button>
+                        <div />
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleCameraMove("left")}
+                          aria-label="Move camera left"
+                          className={controlButtonClass}
+                        >
+                          <ArrowLeft className="size-4" />
+                        </Button>
+                        <div className="h-8" />
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleCameraMove("right")}
+                          aria-label="Move camera right"
+                          className={controlButtonClass}
+                        >
+                          <ArrowRight className="size-4" />
+                        </Button>
+                        <div />
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => handleCameraMove("down")}
+                          aria-label="Move camera down"
+                          className={controlButtonClass}
+                        >
+                          <ArrowDown className="size-4" />
+                        </Button>
+                        <div />
+                      </div>
+
+                      <div className="w-32 flex justify-end">
+                        <Button
+                          type="button"
+                          onClick={handleFullscreen}
+                          variant="outline"
+                          size={isFullscreen ? "sm" : "default"}
+                          className={controlButtonClass}
+                        >
+                          {isFullscreen ? <Minimize2 className="size-5" /> : <Maximize2 className="size-5" />}
+                        </Button>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </CardContent>

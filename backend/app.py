@@ -58,6 +58,19 @@ def public_user(user: dict[str, str]) -> dict[str, str]:
     }
 
 
+def require_authenticated_user() -> tuple[dict[str, str] | None, tuple[dict[str, str], int] | None]:
+    username = session.get("username")
+    if not username:
+        return None, ({"message": "Authentication required"}, 401)
+
+    user = find_user(username)
+    if user is None:
+        session.pop("username", None)
+        return None, ({"message": "Authentication required"}, 401)
+
+    return user, None
+
+
 @app.route("/api/health")
 def health():
     return jsonify({"status": "ok"})
@@ -108,16 +121,31 @@ def login():
 
 @app.route("/api/me")
 def me():
-    username = session.get("username")
-    if not username:
-        return jsonify({"message": "Authentication required"}), 401
-
-    user = find_user(username)
-    if user is None:
-        session.pop("username", None)
-        return jsonify({"message": "Authentication required"}), 401
+    user, auth_error = require_authenticated_user()
+    if auth_error:
+        message, status = auth_error
+        return jsonify(message), status
 
     return jsonify({"user": public_user(user)})
+
+
+@app.route("/api/camera/move", methods=["POST"])
+def camera_move():
+    user, auth_error = require_authenticated_user()
+    if auth_error:
+        message, status = auth_error
+        return jsonify(message), status
+
+    payload = request.get_json(silent=True) or {}
+    direction = str(payload.get("direction", "")).strip().lower()
+    allowed_directions = {"up", "down", "left", "right"}
+
+    if direction not in allowed_directions:
+        return jsonify({"message": "Direction must be one of: up, down, left, right"}), 400
+
+    # Placeholder for future camera hardware integration.
+    app.logger.info("Camera move requested by %s: %s", user["username"], direction)
+    return jsonify({"message": "Move command received", "direction": direction})
 
 
 @app.route("/api/logout", methods=["POST"])
