@@ -21,7 +21,6 @@ import { toast } from "sonner";
 type CurrentUser = {
   name: string;
   username: string;
-  password: string;
 };
 
 export function CameraStream() {
@@ -35,14 +34,35 @@ export function CameraStream() {
   const activityIntervalRef = useRef<number | null>(null);
 
   useEffect(() => {
-    // Check if user is logged in
-    const user = localStorage.getItem("petcam_current_user");
-    if (!user) {
-      toast.error("Please login first!");
-      navigate("/");
-      return;
-    }
-    setCurrentUser(JSON.parse(user));
+    let isMounted = true;
+
+    const loadCurrentUser = async () => {
+      try {
+        const response = await fetch("/api/me", {
+          credentials: "include",
+        });
+
+        if (!response.ok) {
+          throw new Error("Not authenticated");
+        }
+
+        const data = (await response.json()) as { user?: CurrentUser };
+        if (!data.user) {
+          throw new Error("Not authenticated");
+        }
+
+        if (isMounted) {
+          setCurrentUser(data.user);
+          localStorage.setItem("petcam_current_user", JSON.stringify(data.user));
+        }
+      } catch {
+        localStorage.removeItem("petcam_current_user");
+        toast.error("Please login first!");
+        navigate("/");
+      }
+    };
+
+    loadCurrentUser();
 
     activityIntervalRef.current = window.setInterval(() => {
       if (motionDetection) {
@@ -54,6 +74,7 @@ export function CameraStream() {
     }, 5000);
 
     return () => {
+      isMounted = false;
       if (activityIntervalRef.current) {
         clearInterval(activityIntervalRef.current);
       }
@@ -71,10 +92,19 @@ export function CameraStream() {
     };
   }, []);
 
-  const handleLogout = () => {
-    localStorage.removeItem("petcam_current_user");
-    toast.success("Logged out successfully! 👋");
-    navigate("/");
+  const handleLogout = async () => {
+    try {
+      await fetch("/api/logout", {
+        method: "POST",
+        credentials: "include",
+      });
+    } catch {
+      // Best effort logout on backend.
+    } finally {
+      localStorage.removeItem("petcam_current_user");
+      toast.success("Logged out successfully! 👋");
+      navigate("/");
+    }
   };
 
   const toggleStream = () => {

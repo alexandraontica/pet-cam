@@ -11,7 +11,6 @@ import { toast } from "sonner";
 type User = {
   name: string;
   username: string;
-  password: string;
 };
 
 export function Auth() {
@@ -22,46 +21,67 @@ export function Auth() {
   const [registerUsername, setRegisterUsername] = useState("");
   const [registerPassword, setRegisterPassword] = useState("");
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    // Mock authentication - check if user exists
-    const users = JSON.parse(localStorage.getItem("petcam_users") || "[]") as User[];
-    const user = users.find((u) => u.username === loginUsername && u.password === loginPassword);
-    
-    if (user) {
-      localStorage.setItem("petcam_current_user", JSON.stringify(user));
-      toast.success(`Welcome back, ${user.name}! 🐾`);
+
+    try {
+      const response = await fetch("/api/login", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "include",
+        body: JSON.stringify({
+          username: loginUsername,
+          password: loginPassword,
+        }),
+      });
+
+      const data = (await response.json()) as { message?: string; user?: User };
+
+      if (!response.ok || !data.user) {
+        toast.error(data.message || "Invalid username or password. Please try again!");
+        return;
+      }
+
+      localStorage.setItem("petcam_current_user", JSON.stringify(data.user));
+      toast.success(`Welcome back, ${data.user.name}! 🐾`);
       navigate("/camera");
-    } else {
-      toast.error("Invalid username or password. Please try again!");
+    } catch {
+      toast.error("Could not connect to server. Please try again!");
     }
   };
 
-  const handleRegister = (e: React.FormEvent) => {
+  const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    // Mock registration
-    const users = JSON.parse(localStorage.getItem("petcam_users") || "[]") as User[];
-    
-    // Check if user already exists
-    if (users.find((u) => u.username === registerUsername)) {
-      toast.error("Username already taken!");
-      return;
+
+    try {
+      const response = await fetch("/api/register", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        credentials: "include",
+        body: JSON.stringify({
+          name: registerName,
+          username: registerUsername,
+          password: registerPassword,
+        }),
+      });
+
+      const data = (await response.json()) as { message?: string; user?: User };
+
+      if (!response.ok || !data.user) {
+        toast.error(data.message || "Could not create account.");
+        return;
+      }
+
+      localStorage.setItem("petcam_current_user", JSON.stringify(data.user));
+      toast.success(`Welcome to PetCam, ${data.user.name}! 🎉`);
+      navigate("/camera");
+    } catch {
+      toast.error("Could not connect to server. Please try again!");
     }
-    
-    const newUser = {
-      name: registerName,
-      username: registerUsername,
-      password: registerPassword,
-    };
-    
-    users.push(newUser);
-    localStorage.setItem("petcam_users", JSON.stringify(users));
-    localStorage.setItem("petcam_current_user", JSON.stringify(newUser));
-    
-    toast.success(`Welcome to PetCam, ${registerName}! 🎉`);
-    navigate("/camera");
   };
 
   return (
