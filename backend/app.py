@@ -148,6 +148,18 @@ def camera_move():
     return jsonify({"message": "Move command received", "direction": direction})
 
 
+@app.route("/api/buzzer", methods=["POST"])
+def buzzer_beep():
+    user, auth_error = require_authenticated_user()
+    if auth_error:
+        message, status = auth_error
+        return jsonify(message), status
+
+    # Placeholder for future buzzer hardware integration.
+    app.logger.info("Buzzer beep requested by %s", user["username"])
+    return jsonify({"message": "Buzzer signal received"})
+
+
 @app.route("/api/logout", methods=["POST"])
 def logout():
     session.pop("username", None)

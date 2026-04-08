@@ -33,6 +33,7 @@ export function CameraStream() {
   const [isStreaming, setIsStreaming] = useState(true);
   const [motionDetection, setMotionDetection] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isTriggeringBuzzer, setIsTriggeringBuzzer] = useState(false);
   const [activity, setActivity] = useState<string[]>([]);
   const streamContainerRef = useRef<HTMLDivElement | null>(null);
   const activityIntervalRef = useRef<number | null>(null);
@@ -148,6 +149,32 @@ export function CameraStream() {
       toast.info(`Move camera ${direction}`);
     } catch {
       toast.error("Could not reach backend camera controls endpoint.");
+    }
+  };
+
+  const handleBuzzerTrigger = async () => {
+    if (isTriggeringBuzzer) {
+      return;
+    }
+
+    setIsTriggeringBuzzer(true);
+    try {
+      const response = await fetch("/api/buzzer", {
+        method: "POST",
+        credentials: "include",
+      });
+
+      const data = (await response.json()) as { message?: string };
+      if (!response.ok) {
+        toast.error(data.message || "Could not trigger buzzer.");
+        return;
+      }
+
+      toast.success("Buzzer signal sent to backend 🔊");
+    } catch {
+      toast.error("Could not reach backend buzzer endpoint.");
+    } finally {
+      setIsTriggeringBuzzer(false);
     }
   };
 
@@ -322,6 +349,16 @@ export function CameraStream() {
                 </div>
               </CardContent>
             </Card>
+
+            <Button
+              type="button"
+              onClick={handleBuzzerTrigger}
+              disabled={isTriggeringBuzzer}
+              className="w-full sm:w-auto border-0 bg-gradient-to-r from-pink-500 to-purple-500 text-white shadow-md transition-all hover:from-pink-600 hover:to-purple-600 hover:shadow-lg focus-visible:ring-pink-300 disabled:opacity-70"
+            >
+              <Bell className="size-4 mr-2" />
+              {isTriggeringBuzzer ? "Sending buzzer signal..." : "Make a sound (distract cat)"}
+            </Button>
 
           </div>
 
