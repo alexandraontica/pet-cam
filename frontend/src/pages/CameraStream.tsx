@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router";
+import { io, type Socket } from "socket.io-client";
 import { Button } from "../components/button";
 import { Card, CardContent, CardHeader, CardTitle } from "../components/card";
 import { Badge } from "../components/badge";
@@ -27,6 +28,12 @@ type CurrentUser = {
   username: string;
 };
 
+type MotionSignal = {
+  detected?: boolean;
+  detected_at?: string | null;
+  source?: string | null;
+};
+
 export function CameraStream() {
   const navigate = useNavigate();
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
@@ -34,9 +41,11 @@ export function CameraStream() {
   const [motionDetection, setMotionDetection] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isTriggeringBuzzer, setIsTriggeringBuzzer] = useState(false);
+  const [isSocketConnected, setIsSocketConnected] = useState(false);
   const [activity, setActivity] = useState<string[]>([]);
+  const [lastMotionSignalAt, setLastMotionSignalAt] = useState<string | null>(null);
   const streamContainerRef = useRef<HTMLDivElement | null>(null);
-  const activityIntervalRef = useRef<number | null>(null);
+  const socketRef = useRef<Socket | null>(null);
 
   useEffect(() => {
     let isMounted = true;
@@ -69,22 +78,79 @@ export function CameraStream() {
 
     loadCurrentUser();
 
-    activityIntervalRef.current = window.setInterval(() => {
-      if (motionDetection) {
-        setActivity((prev) => {
-          const newActivity = [...prev, `${new Date().toLocaleTimeString()} - 🐾 Movement detected`];
-          return newActivity.slice(-5);
-        });
-      }
-    }, 5000);
-
     return () => {
       isMounted = false;
-      if (activityIntervalRef.current) {
-        clearInterval(activityIntervalRef.current);
-      }
     };
-  }, [navigate, motionDetection]);
+  }, [navigate]);
+
+  useEffect(() => {
+    const socket = io({
+      withCredentials: true,
+      path: "/socket.io",
+      transports: ["polling"],
+      upgrade: false,
+    });
+    socketRef.current = socket;
+
+    const onConnect = () => {
+      setIsSocketConnected(true);
+    };
+
+    const onDisconnect = () => {
+      setIsSocketConnected(false);
+    };
+
+    const onMotionSignal = (data: MotionSignal) => {
+      if (!motionDetection || !data.detected || !data.detected_at) {
+        return;
+      }
+
+      setLastMotionSignalAt((prev) => {
+        if (prev === data.detected_at) {
+          return prev;
+        }
+
+        setActivity((current) => {
+          const newActivity = [
+            ...current,
+            `${new Date().toLocaleTimeString()} - 🐾 Movement detected (${data.source || "sensor"})`,
+          ];
+          return newActivity.slice(-5);
+        });
+        return data.detected_at ?? prev;
+      });
+    };
+
+    socket.on("connect", onConnect);
+    socket.on("disconnect", onDisconnect);
+    socket.on("motion_signal", onMotionSignal);
+
+    return () => {
+      socket.off("connect", onConnect);
+      socket.off("disconnect", onDisconnect);
+      socket.off("motion_signal", onMotionSignal);
+      socket.disconnect();
+      socketRef.current = null;
+      setIsSocketConnected(false);
+    };
+  }, [motionDetection]);
+
+  const emitSocketEvent = <TResponse,>(event: string, payload?: unknown): Promise<TResponse> => {
+    const socket = socketRef.current;
+    if (!socket || !socket.connected) {
+      return Promise.reject(new Error("Socket not connected"));
+    }
+
+    return new Promise<TResponse>((resolve, reject) => {
+      socket.timeout(2000).emit(event, payload, (error: unknown, response: TResponse) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve(response);
+      });
+    });
+  };
 
   useEffect(() => {
     const onFullscreenChange = () => {
@@ -131,6 +197,19 @@ export function CameraStream() {
 
   const handleCameraMove = async (direction: "up" | "down" | "left" | "right") => {
     try {
+      if (isSocketConnected) {
+        const socketResponse = await emitSocketEvent<{ ok?: boolean; message?: string }>("camera_move", {
+          direction,
+        });
+        if (!socketResponse?.ok) {
+          toast.error(socketResponse?.message || "Could not send camera command.");
+          return;
+        }
+
+        toast.info(`Move camera ${direction}`);
+        return;
+      }
+
       const response = await fetch("/api/camera/move", {
         method: "POST",
         headers: {
@@ -159,6 +238,17 @@ export function CameraStream() {
 
     setIsTriggeringBuzzer(true);
     try {
+      if (isSocketConnected) {
+        const socketResponse = await emitSocketEvent<{ ok?: boolean; message?: string }>("trigger_buzzer");
+        if (!socketResponse?.ok) {
+          toast.error(socketResponse?.message || "Could not trigger buzzer.");
+          return;
+        }
+
+        toast.success("Buzzer signal sent to backend 🔊");
+        return;
+      }
+
       const response = await fetch("/api/buzzer", {
         method: "POST",
         credentials: "include",

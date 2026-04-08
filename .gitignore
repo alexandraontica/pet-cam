@@ -26,3 +26,4 @@ dist-ssr
 .venv
 .env
 users.json
+__pycache__

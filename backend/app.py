@@ -1,9 +1,11 @@
 from pathlib import Path
+from datetime import datetime, timezone
 import json
 import os
 
 from flask import Flask, jsonify, request, session
 from flask_cors import CORS
+from flask_socketio import SocketIO, emit
 from werkzeug.security import check_password_hash, generate_password_hash
 
 
@@ -26,6 +28,20 @@ CORS(
         "http://127.0.0.1:5173",
     ],
 )
+socketio = SocketIO(
+    app,
+    async_mode="threading",
+    cors_allowed_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+)
+
+motion_signal_state: dict[str, str | bool | None] = {
+    "detected": False,
+    "detected_at": None,
+    "source": None,
+}
 
 
 def ensure_storage() -> None:
@@ -69,6 +85,10 @@ def require_authenticated_user() -> tuple[dict[str, str] | None, tuple[dict[str,
         return None, ({"message": "Authentication required"}, 401)
 
     return user, None
+
+
+def current_utc_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 @app.route("/api/health")
@@ -145,6 +165,14 @@ def camera_move():
 
     # Placeholder for future camera hardware integration.
     app.logger.info("Camera move requested by %s: %s", user["username"], direction)
+    socketio.emit(
+        "camera_command",
+        {
+            "direction": direction,
+            "requested_by": user["username"],
+            "at": current_utc_timestamp(),
+        },
+    )
     return jsonify({"message": "Move command received", "direction": direction})
 
 
@@ -157,7 +185,89 @@ def buzzer_beep():
 
     # Placeholder for future buzzer hardware integration.
     app.logger.info("Buzzer beep requested by %s", user["username"])
+    socketio.emit(
+        "buzzer_signal",
+        {
+            "requested_by": user["username"],
+            "at": current_utc_timestamp(),
+        },
+    )
     return jsonify({"message": "Buzzer signal received"})
+
+
+@app.route("/api/motion", methods=["GET"])
+def get_motion_signal():
+    user, auth_error = require_authenticated_user()
+    if auth_error:
+        message, status = auth_error
+        return jsonify(message), status
+
+    return jsonify(motion_signal_state)
+
+
+@app.route("/api/motion", methods=["POST"])
+def set_motion_signal():
+    payload = request.get_json(silent=True) or {}
+    detected = bool(payload.get("detected", True))
+    source = str(payload.get("source", "sensor")).strip() or "sensor"
+
+    # Placeholder endpoint for future hardware sensor integration.
+    motion_signal_state["detected"] = detected
+    motion_signal_state["source"] = source
+    motion_signal_state["detected_at"] = None if not detected else current_utc_timestamp()
+    socketio.emit("motion_signal", motion_signal_state)
+
+    app.logger.info("Motion signal received: detected=%s source=%s", detected, source)
+    return jsonify({"message": "Motion signal updated", **motion_signal_state})
+
+
+@socketio.on("connect")
+def on_connect():
+    if not session.get("username"):
+        return False
+
+    emit("motion_signal", motion_signal_state)
+
+
+@socketio.on("camera_move")
+def on_camera_move(payload):
+    user, auth_error = require_authenticated_user()
+    if auth_error:
+        return {"ok": False, "message": "Authentication required"}
+
+    payload = payload or {}
+    direction = str(payload.get("direction", "")).strip().lower()
+    allowed_directions = {"up", "down", "left", "right"}
+    if direction not in allowed_directions:
+        return {"ok": False, "message": "Direction must be one of: up, down, left, right"}
+
+    app.logger.info("Camera move requested by %s via socket: %s", user["username"], direction)
+    socketio.emit(
+        "camera_command",
+        {
+            "direction": direction,
+            "requested_by": user["username"],
+            "at": current_utc_timestamp(),
+        },
+    )
+    return {"ok": True, "direction": direction}
+
+
+@socketio.on("trigger_buzzer")
+def on_trigger_buzzer(_payload=None):
+    user, auth_error = require_authenticated_user()
+    if auth_error:
+        return {"ok": False, "message": "Authentication required"}
+
+    app.logger.info("Buzzer trigger requested by %s via socket", user["username"])
+    socketio.emit(
+        "buzzer_signal",
+        {
+            "requested_by": user["username"],
+            "at": current_utc_timestamp(),
+        },
+    )
+    return {"ok": True}
 
 
 @app.route("/api/logout", methods=["POST"])
@@ -167,4 +277,4 @@ def logout():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, port=5000)
+    socketio.run(app, debug=True, port=5000)
