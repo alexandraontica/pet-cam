@@ -1,11 +1,14 @@
 from pathlib import Path
 from datetime import datetime, timezone
+from threading import Lock
+import base64
 import json
 import os
 
+import cv2
 from flask import Flask, jsonify, request, session
 from flask_cors import CORS
-from flask_socketio import SocketIO, emit
+from flask_socketio import SocketIO, emit, join_room, leave_room
 from werkzeug.security import check_password_hash, generate_password_hash
 
 
@@ -42,6 +45,15 @@ motion_signal_state: dict[str, str | bool | None] = {
     "detected_at": None,
     "source": None,
 }
+
+DEFAULT_STREAM_INTERVAL_MS = 66
+MIN_STREAM_INTERVAL_MS = 33
+MAX_STREAM_INTERVAL_MS = 500
+
+stream_state_lock = Lock()
+stream_subscribers: set[str] = set()
+stream_interval_ms = DEFAULT_STREAM_INTERVAL_MS
+stream_worker_active = False
 
 
 def ensure_storage() -> None:
@@ -89,6 +101,75 @@ def require_authenticated_user() -> tuple[dict[str, str] | None, tuple[dict[str,
 
 def current_utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def clamp_interval_ms(value: int) -> int:
+    return max(MIN_STREAM_INTERVAL_MS, min(value, MAX_STREAM_INTERVAL_MS))
+
+
+def encode_frame_as_data_url(frame) -> str | None:
+    success, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
+    if not success:
+        return None
+
+    frame_b64 = base64.b64encode(encoded.tobytes()).decode("ascii")
+    return f"data:image/jpeg;base64,{frame_b64}"
+
+
+def get_stream_interval_ms() -> int:
+    with stream_state_lock:
+        return stream_interval_ms
+
+
+def camera_stream_loop() -> None:
+    global stream_worker_active
+
+    camera = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+    if not camera.isOpened():
+        camera.release()
+        camera = cv2.VideoCapture(0)
+
+    if not camera.isOpened():
+        socketio.emit(
+            "camera_stream_error",
+            {"message": "Could not open laptop camera for simulation."},
+        )
+        with stream_state_lock:
+            stream_worker_active = False
+        return
+
+    camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 360)
+
+    try:
+        while True:
+            with stream_state_lock:
+                has_subscribers = len(stream_subscribers) > 0
+
+            if not has_subscribers:
+                break
+
+            ok, frame = camera.read()
+            if not ok:
+                socketio.sleep(0.1)
+                continue
+
+            frame_payload = encode_frame_as_data_url(frame)
+            if frame_payload is not None:
+                socketio.emit(
+                    "camera_frame",
+                    {
+                        "image": frame_payload,
+                        "captured_at": current_utc_timestamp(),
+                    },
+                    to="camera_stream",
+                )
+
+            socketio.sleep(get_stream_interval_ms() / 1000)
+    finally:
+        camera.release()
+        with stream_state_lock:
+            stream_worker_active = False
 
 
 @app.route("/api/health")
@@ -227,6 +308,58 @@ def on_connect():
         return False
 
     emit("motion_signal", motion_signal_state)
+
+
+@socketio.on("subscribe_camera_stream")
+def on_subscribe_camera_stream(payload=None):
+    global stream_worker_active, stream_interval_ms
+
+    user, auth_error = require_authenticated_user()
+    if auth_error:
+        return {"ok": False, "message": "Authentication required"}
+
+    payload = payload or {}
+    requested_interval_ms = payload.get("interval_ms", DEFAULT_STREAM_INTERVAL_MS)
+    try:
+        requested_interval_ms = int(requested_interval_ms)
+    except (TypeError, ValueError):
+        requested_interval_ms = DEFAULT_STREAM_INTERVAL_MS
+
+    requested_interval_ms = clamp_interval_ms(requested_interval_ms)
+
+    with stream_state_lock:
+        stream_subscribers.add(request.sid)
+        stream_interval_ms = requested_interval_ms
+        should_start_worker = not stream_worker_active
+        if should_start_worker:
+            stream_worker_active = True
+
+    join_room("camera_stream")
+
+    if should_start_worker:
+        socketio.start_background_task(camera_stream_loop)
+    app.logger.info(
+        "Camera stream subscribed by %s (sid=%s, interval=%sms)",
+        user["username"],
+        request.sid,
+        requested_interval_ms,
+    )
+    return {"ok": True, "interval_ms": requested_interval_ms}
+
+
+@socketio.on("unsubscribe_camera_stream")
+def on_unsubscribe_camera_stream(_payload=None):
+    with stream_state_lock:
+        stream_subscribers.discard(request.sid)
+
+    leave_room("camera_stream")
+    return {"ok": True}
+
+
+@socketio.on("disconnect")
+def on_disconnect():
+    with stream_state_lock:
+        stream_subscribers.discard(request.sid)
 
 
 @socketio.on("camera_move")

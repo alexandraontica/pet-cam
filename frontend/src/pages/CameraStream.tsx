@@ -34,6 +34,11 @@ type MotionSignal = {
   source?: string | null;
 };
 
+type CameraFramePayload = {
+  image?: string;
+  captured_at?: string;
+};
+
 export function CameraStream() {
   const navigate = useNavigate();
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
@@ -42,10 +47,18 @@ export function CameraStream() {
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isTriggeringBuzzer, setIsTriggeringBuzzer] = useState(false);
   const [isSocketConnected, setIsSocketConnected] = useState(false);
+  const [latestFrame, setLatestFrame] = useState<string | null>(null);
+  const [latestFrameAt, setLatestFrameAt] = useState<string | null>(null);
   const [activity, setActivity] = useState<string[]>([]);
-  const [lastMotionSignalAt, setLastMotionSignalAt] = useState<string | null>(null);
+  const [, setLastMotionSignalAt] = useState<string | null>(null);
   const streamContainerRef = useRef<HTMLDivElement | null>(null);
   const socketRef = useRef<Socket | null>(null);
+  const streamSubscribedRef = useRef(false);
+  const motionDetectionRef = useRef(motionDetection);
+
+  useEffect(() => {
+    motionDetectionRef.current = motionDetection;
+  }, [motionDetection]);
 
   useEffect(() => {
     let isMounted = true;
@@ -98,10 +111,11 @@ export function CameraStream() {
 
     const onDisconnect = () => {
       setIsSocketConnected(false);
+      streamSubscribedRef.current = false;
     };
 
     const onMotionSignal = (data: MotionSignal) => {
-      if (!motionDetection || !data.detected || !data.detected_at) {
+      if (!motionDetectionRef.current || !data.detected || !data.detected_at) {
         return;
       }
 
@@ -121,19 +135,74 @@ export function CameraStream() {
       });
     };
 
+    const onCameraFrame = (data: CameraFramePayload) => {
+      if (!data.image) {
+        return;
+      }
+
+      setLatestFrame(data.image);
+      setLatestFrameAt(data.captured_at ?? new Date().toISOString());
+    };
+
+    const onCameraStreamError = (data: { message?: string }) => {
+      toast.error(data.message || "Camera stream error on backend.");
+    };
+
     socket.on("connect", onConnect);
     socket.on("disconnect", onDisconnect);
     socket.on("motion_signal", onMotionSignal);
+    socket.on("camera_frame", onCameraFrame);
+    socket.on("camera_stream_error", onCameraStreamError);
 
     return () => {
+      if (socket.connected && streamSubscribedRef.current) {
+        socket.emit("unsubscribe_camera_stream");
+        streamSubscribedRef.current = false;
+      }
       socket.off("connect", onConnect);
       socket.off("disconnect", onDisconnect);
       socket.off("motion_signal", onMotionSignal);
+      socket.off("camera_frame", onCameraFrame);
+      socket.off("camera_stream_error", onCameraStreamError);
       socket.disconnect();
       socketRef.current = null;
       setIsSocketConnected(false);
     };
-  }, [motionDetection]);
+  }, []);
+
+  useEffect(() => {
+    const socket = socketRef.current;
+    if (!socket || !socket.connected) {
+      return;
+    }
+
+    if (isStreaming && !streamSubscribedRef.current) {
+      socket.emit(
+        "subscribe_camera_stream",
+        { interval_ms: 66 },
+        (response?: { ok?: boolean; message?: string }) => {
+          if (!response?.ok) {
+            toast.error(response?.message || "Could not subscribe to camera stream.");
+            return;
+          }
+
+          streamSubscribedRef.current = true;
+        }
+      );
+      return;
+    }
+
+    if (!isStreaming && streamSubscribedRef.current) {
+      socket.emit("unsubscribe_camera_stream", (response?: { ok?: boolean; message?: string }) => {
+        if (!response?.ok) {
+          toast.error(response?.message || "Could not pause backend stream.");
+          return;
+        }
+
+        streamSubscribedRef.current = false;
+      });
+    }
+  }, [isSocketConnected, isStreaming]);
 
   const emitSocketEvent = <TResponse,>(event: string, payload?: unknown): Promise<TResponse> => {
     const socket = socketRef.current;
@@ -319,14 +388,28 @@ export function CameraStream() {
                   <div className={`relative bg-gray-900 ${isFullscreen ? "flex-1 min-h-0" : "aspect-video"}`}>
                     {isStreaming ? (
                       <>
-                        <img
-                          src="https://images.unsplash.com/photo-1586731790190-c607b3c32150?crop=entropy&cs=tinysrgb&fit=max&fm=jpg&ixid=M3w3Nzg4Nzd8MHwxfHNlYXJjaHwxfHxjdXRlJTIwY2F0JTIwc2xlZXBpbmd8ZW58MXx8fHwxNzc0ODY0Njg5fDA&ixlib=rb-4.1.0&q=80&w=1080&utm_source=figma&utm_medium=referral"
-                          alt="Felix the cat"
-                          className="w-full h-full object-cover"
-                        />
+                        {latestFrame ? (
+                          <img
+                            src={latestFrame}
+                            alt="Camera stream"
+                            className="w-full h-full object-cover"
+                          />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center">
+                            <div className="text-center text-gray-300 px-4">
+                              <Video className="size-12 mx-auto mb-3" />
+                              <p className="font-medium">Waiting for live camera frames...</p>
+                              <p className="text-sm text-gray-400 mt-1">
+                                {isSocketConnected
+                                  ? "Socket connected. Backend should start sending frames."
+                                  : "Socket disconnected. Reconnect in progress..."}
+                              </p>
+                            </div>
+                          </div>
+                        )}
                         {/* Simulated timestamp overlay */}
                         <div className="absolute top-4 left-4 bg-black/60 text-white px-3 py-1 rounded text-sm font-mono">
-                          {new Date().toLocaleTimeString()}
+                          {latestFrameAt ? new Date(latestFrameAt).toLocaleTimeString() : new Date().toLocaleTimeString()}
                         </div>
                         {/* Motion detection indicator */}
                         {motionDetection && (
