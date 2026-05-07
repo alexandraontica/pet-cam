@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <SPI.h>
+#include <Wire.h>
 #include "esp_camera.h"
 #include "img_converters.h"  // fmt2jpg() - conversie RGB565 -> JPEG
 
