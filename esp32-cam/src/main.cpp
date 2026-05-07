@@ -18,6 +18,7 @@
 #define BACKEND_HOST "10.213.151.82"
 #define BACKEND_PORT 5000
 #define FRAME_ENDPOINT "/api/camera/frame"
+#define MOTION_ENDPOINT "/api/motion"
 
 // Interval intre cadre (ms). 200ms ~ 5 FPS — compromis bun
 // intre fluiditate si ce poate duce ESP32-ul cu conversie RGB->JPEG.
@@ -49,6 +50,7 @@
 
 // ======================== GLOBALS ==========================
 String backendUrl;
+String motionUrl;
 unsigned long lastFrameTime = 0;
 unsigned long frameCount = 0;
 unsigned long fpsTimer = 0;
@@ -142,6 +144,32 @@ void connectWiFi() {
   } else {
     Serial.println("\nWiFi ESUAT! Se va reincerca...");
   }
+}
+
+/**
+ * Trimite o notificare catre backend cand senzorul PIR detecteaza miscare.
+ * Returneaza true daca backend-ul a confirmat primirea.
+ */
+bool notifyMotion() {
+  HTTPClient http;
+  http.begin(motionUrl);
+  http.addHeader("Content-Type", "application/json");
+  http.setTimeout(HTTP_TIMEOUT_MS);
+
+  int httpCode = http.POST("{\"detected\": true, \"source\": \"PIR_ESP32\"}");
+  bool success = false;
+
+  if (httpCode == 200) {
+    Serial.println("Backend notificat cu succes.");
+    success = true;
+  } else if (httpCode > 0) {
+    Serial.printf("Backend a raspuns cu eroare: %d\n", httpCode);
+  } else {
+    Serial.printf("Eroare la conectare: %s\n", http.errorToString(httpCode).c_str());
+  }
+  
+  http.end();
+  return success;
 }
 
 /**
@@ -240,7 +268,10 @@ void setup() {
   // Construim URL-ul backend
   backendUrl = String("http://") + BACKEND_HOST + ":" +
                String(BACKEND_PORT) + FRAME_ENDPOINT;
+  motionUrl = String("http://") + BACKEND_HOST + ":" +
+              String(BACKEND_PORT) + MOTION_ENDPOINT;
   Serial.printf("Backend URL: %s\n", backendUrl.c_str());
+  Serial.printf("Motion URL: %s\n", motionUrl.c_str());
 
   // Initializeaza camera
   if (!initCamera()) {
@@ -264,7 +295,8 @@ void loop() {
     unsigned long currentMillis = millis();
     // Verificam perioada de cooldown de 3 secunde (3000 ms)
     if (currentMillis - lastMotionDetectionTime >= 3000) {
-      Serial.println("S-a detectat miscare!");
+      Serial.println("S-a detectat miscare! Trimit notificare catre backend...");
+      notifyMotion();
       lastMotionDetectionTime = currentMillis;
     }
     // Reseteaza mereu flag-ul pentru a astepta urmatoarea intrerupere

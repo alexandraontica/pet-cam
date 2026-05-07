@@ -127,7 +127,7 @@ export function CameraStream() {
         setActivity((current) => {
           const newActivity = [
             ...current,
-            `${new Date().toLocaleTimeString()} - 🐾 Movement detected (${data.source || "sensor"})`,
+            `${new Date().toLocaleTimeString()} - 🐾 Movement detected`,
           ];
           return newActivity.slice(-5);
         });
@@ -431,9 +431,8 @@ export function CameraStream() {
 
                   {/* Controls */}
                   <div
-                    className={`bg-gradient-to-r from-pink-100 to-purple-100 border-t border-purple-100 ${
-                      isFullscreen ? "p-2 shrink-0" : "p-3"
-                    }`}
+                    className={`bg-gradient-to-r from-pink-100 to-purple-100 border-t border-purple-100 ${isFullscreen ? "p-2 shrink-0" : "p-3"
+                      }`}
                   >
                     <div className="flex items-center justify-between gap-3">
                       <div className="w-32 flex justify-start">
@@ -580,11 +579,20 @@ export function CameraStream() {
                   <Switch
                     id="motion-detection"
                     checked={motionDetection}
-                    onCheckedChange={(checked) => {
+                    onCheckedChange={async (checked) => {
                       setMotionDetection(checked);
                       toast.info(
                         checked ? "Motion alerts enabled 🔔" : "Motion alerts disabled 🔕"
                       );
+                      try {
+                        await fetch("/api/settings/notifications", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ enabled: checked }),
+                        });
+                      } catch {
+                        toast.error("Could not sync notification settings with backend.");
+                      }
                     }}
                   />
                 </div>

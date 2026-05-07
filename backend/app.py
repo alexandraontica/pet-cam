@@ -10,6 +10,8 @@ from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from werkzeug.security import check_password_hash, generate_password_hash
 
+from send_notification import send_notification, send_photo
+
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
@@ -45,7 +47,9 @@ motion_signal_state: dict[str, str | bool | None] = {
     "source": None,
 }
 
-# --- Camera frame buffer (populated by ESP32-CAM via HTTP POST) ---
+notifications_enabled = True
+
+# Camera frame buffer (populated by ESP32-CAM via HTTP POST) 
 frame_lock = Lock()
 latest_frame_jpeg: bytes | None = None        # Raw JPEG bytes from ESP32
 latest_frame_data_url: str | None = None       # Base64 data URL for Socket.IO
@@ -295,8 +299,32 @@ def set_motion_signal():
     motion_signal_state["detected_at"] = None if not detected else current_utc_timestamp()
     socketio.emit("motion_signal", motion_signal_state)
 
+    global notifications_enabled
+    if detected and notifications_enabled:
+        # Notify via Telegram
+        send_notification("🚨 *Miscare detectata!*")
+        
+        # Save latest frame and send it as a photo if available
+        with frame_lock:
+            frame = latest_frame_jpeg
+            
+        if frame is not None:
+            photo_path = DATA_DIR / "motion_snapshot.jpg"
+            photo_path.write_bytes(frame)
+            send_photo(str(photo_path), "Iata ultimul cadru capturat la momentul detectiei:")
+
     app.logger.info("Motion signal received: detected=%s source=%s", detected, source)
     return jsonify({"message": "Motion signal updated", **motion_signal_state})
+
+
+@app.route("/api/settings/notifications", methods=["POST"])
+def update_notifications_setting():
+    """Update the backend notifications setting based on frontend switch."""
+    global notifications_enabled
+    payload = request.get_json(silent=True) or {}
+    notifications_enabled = bool(payload.get("enabled", True))
+    app.logger.info("Notifications enabled set to: %s", notifications_enabled)
+    return jsonify({"message": "Settings updated", "enabled": notifications_enabled})
 
 
 @socketio.on("connect")
