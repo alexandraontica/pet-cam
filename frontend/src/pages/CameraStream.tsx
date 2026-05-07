@@ -370,8 +370,8 @@ export function CameraStream() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Main Camera Stream */}
           <div className="lg:col-span-2 space-y-4">
-            <Card className="border-2 border-purple-200 shadow-xl overflow-hidden">
-              <CardHeader className="bg-gradient-to-r from-pink-100 to-purple-100">
+            <Card className="border-2 border-purple-200 shadow-xl overflow-hidden gap-0">
+              <CardHeader className="bg-gradient-to-r from-pink-100 to-purple-100 pb-4">
                 <div className="flex items-center justify-between">
                   <CardTitle className="flex items-center gap-2">
                     <Video className="size-5 text-pink-500" />
