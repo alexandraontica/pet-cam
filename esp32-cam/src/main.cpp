@@ -5,6 +5,9 @@
 #include <Wire.h>
 #include "esp_camera.h"
 #include "img_converters.h"  // fmt2jpg() - conversie RGB565 -> JPEG
+#include "soc/soc.h"
+#include "soc/gpio_reg.h"
+#include "soc/io_mux_reg.h"
 
 // ======================= CONFIGURARE =======================
 // WiFi
@@ -16,7 +19,7 @@
 #define BACKEND_PORT 5000
 #define FRAME_ENDPOINT "/api/camera/frame"
 
-// Interval intre cadre (ms). 200ms ≈ 5 FPS — compromis bun
+// Interval intre cadre (ms). 200ms ~ 5 FPS — compromis bun
 // intre fluiditate si ce poate duce ESP32-ul cu conversie RGB->JPEG.
 #define CAPTURE_INTERVAL_MS 200
 
@@ -49,6 +52,21 @@ String backendUrl;
 unsigned long lastFrameTime = 0;
 unsigned long frameCount = 0;
 unsigned long fpsTimer = 0;
+
+// ======================== SENZORI ==========================
+#define PIR_PIN 13
+volatile bool motionDetected = false;
+
+// Functia executata la intrerupere, tinuta in RAM (IRAM_ATTR) pentru viteza
+void IRAM_ATTR pirInterrupt(void* arg) {
+  // Citim starea tuturor intreruperilor GPIO si aplicam o masca pentru a izola pinul 13
+  if (REG_READ(GPIO_STATUS_REG) & (1 << PIR_PIN)) {
+    motionDetected = true;
+    
+    // Scriem 1 in registrul de clear la pozitia bitului 13 pentru a reseta flag-ul intreruperii hardware
+    REG_WRITE(GPIO_STATUS_W1TC_REG, (1 << PIR_PIN));
+  }
+}
 
 // ======================= FUNCTII ===========================
 
@@ -193,6 +211,32 @@ void setup() {
   delay(1000);
   Serial.println("\n\n=== PET-CAM ESP32 ===");
 
+  // --- Configurare senzor PIR ---
+  
+  // Setam functia de baza GPIO, activam functionalitatea de input si pull-down in multiplexorul pinului 13
+  REG_WRITE(IO_MUX_GPIO13_REG, (2 << MCU_SEL_S) | FUN_IE | FUN_PD);
+  
+  // Oprim driver-ul de output pentru pinul 13 scriind 1 la pozitia aferenta in registrul de dezactivare a iesirii
+  REG_WRITE(GPIO_ENABLE_W1TC_REG, (1 << PIR_PIN));
+  
+  // Citim starea curenta a configuratiei pinului 13 intr-o variabila temporara
+  uint32_t pin_config = REG_READ(GPIO_PIN13_REG);
+  
+  // Stergem bitii care controleaza tipul de intrerupere aplicand o masca logica AND NOT
+  pin_config &= ~GPIO_PIN_INT_TYPE_M;
+  
+  // Inseram valoarea pentru declansare pe front crescator shiftata pe pozitia corecta din registru
+  pin_config |= (GPIO_INTR_POSEDGE << GPIO_PIN_INT_TYPE_S);
+  
+  // Scriem configuratia modificata inapoi in registrul pinului 13
+  REG_WRITE(GPIO_PIN13_REG, pin_config);
+  
+  // Initializam serviciul global de gestionare a intreruperilor pe GPIO
+  gpio_install_isr_service(0);
+  
+  // Atasam functia handler creata anterior la evenimentele pinului 13
+  gpio_isr_handler_add((gpio_num_t)PIR_PIN, pirInterrupt, NULL);
+
   // Construim URL-ul backend
   backendUrl = String("http://") + BACKEND_HOST + ":" +
                String(BACKEND_PORT) + FRAME_ENDPOINT;
@@ -214,6 +258,19 @@ void setup() {
 
 // ========================= LOOP ============================
 void loop() {
+  // --- Procesare Senzor PIR ---
+  static unsigned long lastMotionDetectionTime = 0;
+  if (motionDetected) {
+    unsigned long currentMillis = millis();
+    // Verificam perioada de cooldown de 3 secunde (3000 ms)
+    if (currentMillis - lastMotionDetectionTime >= 3000) {
+      Serial.println("S-a detectat miscare!");
+      lastMotionDetectionTime = currentMillis;
+    }
+    // Reseteaza mereu flag-ul pentru a astepta urmatoarea intrerupere
+    motionDetected = false;
+  }
+
   // Reconectare WiFi daca s-a deconectat
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi deconectat — reincerc...");
@@ -240,8 +297,7 @@ void loop() {
   // Afiseaza FPS la fiecare 5 secunde
   if (now - fpsTimer >= 5000) {
     float fps = (float)frameCount / ((now - fpsTimer) / 1000.0);
-    Serial.printf("FPS: %.1f | Free heap: %u bytes | RSSI: %d dBm\n",
-                  fps, ESP.getFreeHeap(), WiFi.RSSI());
+    Serial.printf("FPS: %.1f\n", fps);
     frameCount = 0;
     fpsTimer = now;
   }
