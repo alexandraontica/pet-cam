@@ -392,7 +392,7 @@ export function CameraStream() {
                           <img
                             src={latestFrame}
                             alt="Camera stream"
-                            className="w-full h-full object-cover"
+                            className="w-full h-full object-cover scale-x-[-1]"
                           />
                         ) : (
                           <div className="w-full h-full flex items-center justify-center">

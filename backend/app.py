@@ -5,8 +5,7 @@ import base64
 import json
 import os
 
-import cv2
-from flask import Flask, jsonify, request, session
+from flask import Flask, Response, jsonify, request, session
 from flask_cors import CORS
 from flask_socketio import SocketIO, emit, join_room, leave_room
 from werkzeug.security import check_password_hash, generate_password_hash
@@ -46,23 +45,25 @@ motion_signal_state: dict[str, str | bool | None] = {
     "source": None,
 }
 
-DEFAULT_STREAM_INTERVAL_MS = 66
-MIN_STREAM_INTERVAL_MS = 33
-MAX_STREAM_INTERVAL_MS = 500
+# --- Camera frame buffer (populated by ESP32-CAM via HTTP POST) ---
+frame_lock = Lock()
+latest_frame_jpeg: bytes | None = None        # Raw JPEG bytes from ESP32
+latest_frame_data_url: str | None = None       # Base64 data URL for Socket.IO
+latest_frame_timestamp: str | None = None
 
-stream_state_lock = Lock()
 stream_subscribers: set[str] = set()
-stream_interval_ms = DEFAULT_STREAM_INTERVAL_MS
-stream_worker_active = False
+stream_state_lock = Lock()
 
 
 def ensure_storage() -> None:
+    """Create the data directory and users file if they don't exist."""
     DATA_DIR.mkdir(exist_ok=True)
     if not USERS_FILE.exists():
         USERS_FILE.write_text("[]", encoding="utf-8")
 
 
 def load_users() -> list[dict[str, str]]:
+    """Read and return the list of users from the JSON file."""
     ensure_storage()
     try:
         return json.loads(USERS_FILE.read_text(encoding="utf-8"))
@@ -71,15 +72,18 @@ def load_users() -> list[dict[str, str]]:
 
 
 def save_users(users: list[dict[str, str]]) -> None:
+    """Write the users list to the JSON file."""
     ensure_storage()
     USERS_FILE.write_text(json.dumps(users, indent=2), encoding="utf-8")
 
 
 def find_user(username: str) -> dict[str, str] | None:
+    """Find and return a user by username, or None if not found."""
     return next((user for user in load_users() if user["username"] == username), None)
 
 
 def public_user(user: dict[str, str]) -> dict[str, str]:
+    """Return a safe subset of user data (without password hash)."""
     return {
         "name": user["name"],
         "username": user["username"],
@@ -87,6 +91,7 @@ def public_user(user: dict[str, str]) -> dict[str, str]:
 
 
 def require_authenticated_user() -> tuple[dict[str, str] | None, tuple[dict[str, str], int] | None]:
+    """Check session for an authenticated user. Returns (user, None) or (None, error_response)."""
     username = session.get("username")
     if not username:
         return None, ({"message": "Authentication required"}, 401)
@@ -100,85 +105,71 @@ def require_authenticated_user() -> tuple[dict[str, str] | None, tuple[dict[str,
 
 
 def current_utc_timestamp() -> str:
+    """Return the current UTC time as an ISO 8601 string."""
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def clamp_interval_ms(value: int) -> int:
-    return max(MIN_STREAM_INTERVAL_MS, min(value, MAX_STREAM_INTERVAL_MS))
+def store_and_broadcast_frame(jpeg_bytes: bytes) -> None:
+    """Store the latest JPEG frame and broadcast to all stream subscribers."""
+    global latest_frame_jpeg, latest_frame_data_url, latest_frame_timestamp
 
+    frame_b64 = base64.b64encode(jpeg_bytes).decode("ascii")
+    data_url = f"data:image/jpeg;base64,{frame_b64}"
+    timestamp = current_utc_timestamp()
 
-def encode_frame_as_data_url(frame) -> str | None:
-    success, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
-    if not success:
-        return None
+    with frame_lock:
+        latest_frame_jpeg = jpeg_bytes
+        latest_frame_data_url = data_url
+        latest_frame_timestamp = timestamp
 
-    frame_b64 = base64.b64encode(encoded.tobytes()).decode("ascii")
-    return f"data:image/jpeg;base64,{frame_b64}"
-
-
-def get_stream_interval_ms() -> int:
+    # Broadcast to all subscribed frontend clients
     with stream_state_lock:
-        return stream_interval_ms
+        has_subscribers = len(stream_subscribers) > 0
 
-
-def camera_stream_loop() -> None:
-    global stream_worker_active
-
-    camera = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-    if not camera.isOpened():
-        camera.release()
-        camera = cv2.VideoCapture(0)
-
-    if not camera.isOpened():
+    if has_subscribers:
         socketio.emit(
-            "camera_stream_error",
-            {"message": "Could not open laptop camera for simulation."},
+            "camera_frame",
+            {"image": data_url, "captured_at": timestamp},
+            to="camera_stream",
         )
-        with stream_state_lock:
-            stream_worker_active = False
-        return
-
-    camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 360)
-
-    try:
-        while True:
-            with stream_state_lock:
-                has_subscribers = len(stream_subscribers) > 0
-
-            if not has_subscribers:
-                break
-
-            ok, frame = camera.read()
-            if not ok:
-                socketio.sleep(0.1)
-                continue
-
-            frame_payload = encode_frame_as_data_url(frame)
-            if frame_payload is not None:
-                socketio.emit(
-                    "camera_frame",
-                    {
-                        "image": frame_payload,
-                        "captured_at": current_utc_timestamp(),
-                    },
-                    to="camera_stream",
-                )
-
-            socketio.sleep(get_stream_interval_ms() / 1000)
-    finally:
-        camera.release()
-        with stream_state_lock:
-            stream_worker_active = False
 
 
 @app.route("/api/health")
 def health():
+    """Simple health check endpoint."""
     return jsonify({"status": "ok"})
+
+
+@app.route("/api/camera/frame", methods=["POST"])
+def receive_camera_frame():
+    """Receive a JPEG frame from the ESP32-CAM."""
+    jpeg_bytes = request.get_data()
+    if not jpeg_bytes:
+        return jsonify({"message": "No image data received"}), 400
+
+    # Basic JPEG validation (starts with FF D8)
+    if len(jpeg_bytes) < 2 or jpeg_bytes[0] != 0xFF or jpeg_bytes[1] != 0xD8:
+        return jsonify({"message": "Invalid JPEG data"}), 400
+
+    store_and_broadcast_frame(jpeg_bytes)
+    return jsonify({"ok": True})
+
+
+@app.route("/api/camera/latest")
+def get_latest_frame():
+    """Return the latest JPEG frame (useful for debugging)."""
+    with frame_lock:
+        frame = latest_frame_jpeg
+
+    if frame is None:
+        return jsonify({"message": "No frame available yet"}), 404
+
+    return Response(frame, mimetype="image/jpeg")
 
 
 @app.route("/api/register", methods=["POST"])
 def register():
+    """Register a new user with name, username and password."""
     payload = request.get_json(silent=True) or {}
     name = payload.get("name", "").strip()
     username = payload.get("username", "").strip()
@@ -205,6 +196,7 @@ def register():
 
 @app.route("/api/login", methods=["POST"])
 def login():
+    """Authenticate a user and create a session."""
     payload = request.get_json(silent=True) or {}
     username = payload.get("username", "").strip()
     password = payload.get("password", "")
@@ -222,6 +214,7 @@ def login():
 
 @app.route("/api/me")
 def me():
+    """Return the currently authenticated user's public info."""
     user, auth_error = require_authenticated_user()
     if auth_error:
         message, status = auth_error
@@ -232,6 +225,7 @@ def me():
 
 @app.route("/api/camera/move", methods=["POST"])
 def camera_move():
+    """Send a camera movement command (up/down/left/right) to the ESP32."""
     user, auth_error = require_authenticated_user()
     if auth_error:
         message, status = auth_error
@@ -259,6 +253,7 @@ def camera_move():
 
 @app.route("/api/buzzer", methods=["POST"])
 def buzzer_beep():
+    """Trigger the buzzer on the ESP32 to distract the pet."""
     user, auth_error = require_authenticated_user()
     if auth_error:
         message, status = auth_error
@@ -278,6 +273,7 @@ def buzzer_beep():
 
 @app.route("/api/motion", methods=["GET"])
 def get_motion_signal():
+    """Return the current motion detection state."""
     user, auth_error = require_authenticated_user()
     if auth_error:
         message, status = auth_error
@@ -288,6 +284,7 @@ def get_motion_signal():
 
 @app.route("/api/motion", methods=["POST"])
 def set_motion_signal():
+    """Update the motion signal state (called by the ESP32 sensor)."""
     payload = request.get_json(silent=True) or {}
     detected = bool(payload.get("detected", True))
     source = str(payload.get("source", "sensor")).strip() or "sensor"
@@ -304,6 +301,7 @@ def set_motion_signal():
 
 @socketio.on("connect")
 def on_connect():
+    """Handle new Socket.IO connection. Reject unauthenticated clients."""
     if not session.get("username"):
         return False
 
@@ -312,43 +310,35 @@ def on_connect():
 
 @socketio.on("subscribe_camera_stream")
 def on_subscribe_camera_stream(payload=None):
-    global stream_worker_active, stream_interval_ms
-
+    """Subscribe the client to the live camera stream room."""
     user, auth_error = require_authenticated_user()
     if auth_error:
         return {"ok": False, "message": "Authentication required"}
 
-    payload = payload or {}
-    requested_interval_ms = payload.get("interval_ms", DEFAULT_STREAM_INTERVAL_MS)
-    try:
-        requested_interval_ms = int(requested_interval_ms)
-    except (TypeError, ValueError):
-        requested_interval_ms = DEFAULT_STREAM_INTERVAL_MS
-
-    requested_interval_ms = clamp_interval_ms(requested_interval_ms)
-
     with stream_state_lock:
         stream_subscribers.add(request.sid)
-        stream_interval_ms = requested_interval_ms
-        should_start_worker = not stream_worker_active
-        if should_start_worker:
-            stream_worker_active = True
 
     join_room("camera_stream")
 
-    if should_start_worker:
-        socketio.start_background_task(camera_stream_loop)
+    # Send the latest frame immediately so the client doesn't see a blank screen
+    with frame_lock:
+        data_url = latest_frame_data_url
+        ts = latest_frame_timestamp
+
+    if data_url is not None:
+        emit("camera_frame", {"image": data_url, "captured_at": ts})
+
     app.logger.info(
-        "Camera stream subscribed by %s (sid=%s, interval=%sms)",
+        "Camera stream subscribed by %s (sid=%s)",
         user["username"],
         request.sid,
-        requested_interval_ms,
     )
-    return {"ok": True, "interval_ms": requested_interval_ms}
+    return {"ok": True}
 
 
 @socketio.on("unsubscribe_camera_stream")
 def on_unsubscribe_camera_stream(_payload=None):
+    """Unsubscribe the client from the camera stream room."""
     with stream_state_lock:
         stream_subscribers.discard(request.sid)
 
@@ -358,12 +348,14 @@ def on_unsubscribe_camera_stream(_payload=None):
 
 @socketio.on("disconnect")
 def on_disconnect():
+    """Clean up stream subscription when a client disconnects."""
     with stream_state_lock:
         stream_subscribers.discard(request.sid)
 
 
 @socketio.on("camera_move")
 def on_camera_move(payload):
+    """Handle camera move command received via Socket.IO."""
     user, auth_error = require_authenticated_user()
     if auth_error:
         return {"ok": False, "message": "Authentication required"}
@@ -388,6 +380,7 @@ def on_camera_move(payload):
 
 @socketio.on("trigger_buzzer")
 def on_trigger_buzzer(_payload=None):
+    """Handle buzzer trigger command received via Socket.IO."""
     user, auth_error = require_authenticated_user()
     if auth_error:
         return {"ok": False, "message": "Authentication required"}
@@ -405,9 +398,10 @@ def on_trigger_buzzer(_payload=None):
 
 @app.route("/api/logout", methods=["POST"])
 def logout():
+    """End the current user session."""
     session.pop("username", None)
     return jsonify({"message": "Logged out"})
 
 
 if __name__ == "__main__":
-    socketio.run(app, debug=True, port=5000)
+    socketio.run(app, debug=True, host="0.0.0.0", port=5000)
