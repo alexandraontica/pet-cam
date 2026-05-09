@@ -61,6 +61,9 @@ unsigned long fpsTimer = 0;
 #define BUZZER_PIN 4
 volatile bool motionDetected = false;
 
+int buzzerState = 0;
+unsigned long buzzerStartTime = 0;
+
 // ======================== WEB SERVER =======================
 WebServer server(80);
 
@@ -380,15 +383,11 @@ void setup() {
     server.send(200, "application/json", "{\"status\":\"ok\"}");
     Serial.println("Comanda buzzer primita de la backend!");
     
-    // Distrage atentia animalului de companie
-    // Folosim structura globala GPIO pentru a seta sau reseta bitul
-    GPIO.out_w1ts = (1 << BUZZER_PIN); // Set HIGH
-    delay(150);
-    GPIO.out_w1tc = (1 << BUZZER_PIN); // Set LOW
-    delay(100);
-    GPIO.out_w1ts = (1 << BUZZER_PIN); // Set HIGH
-    delay(150);
-    GPIO.out_w1tc = (1 << BUZZER_PIN); // Set LOW
+    if (buzzerState == 0) {
+      buzzerState = 1;
+      buzzerStartTime = millis();
+      GPIO.out_w1ts = (1 << BUZZER_PIN); // Set HIGH
+    }
   });
 
   server.on("/move", HTTP_POST, []() {
@@ -433,6 +432,23 @@ void setup() {
 void loop() {
   // Procesare cereri HTTP catre ESP32 (ex: /buzzer)
   server.handleClient();
+
+  // --- Procesare Buzzer (Non-Blocking) ---
+  if (buzzerState > 0) {
+    unsigned long currentMillis = millis();
+    if (buzzerState == 1 && currentMillis - buzzerStartTime >= 150) {
+      GPIO.out_w1tc = (1 << BUZZER_PIN); // Set LOW
+      buzzerState = 2;
+      buzzerStartTime = currentMillis;
+    } else if (buzzerState == 2 && currentMillis - buzzerStartTime >= 100) {
+      GPIO.out_w1ts = (1 << BUZZER_PIN); // Set HIGH
+      buzzerState = 3;
+      buzzerStartTime = currentMillis;
+    } else if (buzzerState == 3 && currentMillis - buzzerStartTime >= 150) {
+      GPIO.out_w1tc = (1 << BUZZER_PIN); // Set LOW
+      buzzerState = 0; // Finalizat
+    }
+  }
 
   // --- Procesare Senzor PIR ---
   static unsigned long lastMotionDetectionTime = 0;

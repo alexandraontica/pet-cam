@@ -1,6 +1,6 @@
 from pathlib import Path
 from datetime import datetime, timezone
-from threading import Lock
+from threading import Lock, Thread
 import base64
 import json
 import os
@@ -49,6 +49,7 @@ motion_signal_state: dict[str, str | bool | None] = {
 }
 
 notifications_enabled = True
+autotracking_enabled = False
 
 # Camera frame buffer (populated by ESP32-CAM via HTTP POST) 
 frame_lock = Lock()
@@ -59,6 +60,21 @@ latest_frame_timestamp: str | None = None
 stream_subscribers: set[str] = set()
 stream_state_lock = Lock()
 esp32_ip: str | None = None
+
+def fire_and_forget_esp32_post(url, json_data=None):
+    """Sends a POST request to the ESP32 in a background thread to prevent blocking the backend."""
+    def task():
+        try:
+            if json_data:
+                requests.post(url, json=json_data, timeout=1.5)
+            else:
+                requests.post(url, timeout=1.5)
+        except Exception as e:
+            app.logger.error("Failed to reach ESP32 async at %s: %s", url, e)
+            
+    thread = Thread(target=task)
+    thread.daemon = True
+    thread.start()
 
 
 def ensure_storage() -> None:
@@ -249,11 +265,8 @@ def camera_move():
 
     global esp32_ip
     if esp32_ip:
-        try:
-            requests.post(f"http://{esp32_ip}/move", json={"direction": direction}, timeout=2)
-            app.logger.info("Sent move command to ESP32 at %s: %s", esp32_ip, direction)
-        except Exception as e:
-            app.logger.error("Failed to reach ESP32 for move: %s", e)
+        fire_and_forget_esp32_post(f"http://{esp32_ip}/move", json_data={"direction": direction})
+        app.logger.info("Sent move command to ESP32 at %s: %s", esp32_ip, direction)
 
     app.logger.info("Camera move requested by %s: %s", user["username"], direction)
     socketio.emit(
@@ -278,12 +291,8 @@ def buzzer_beep():
     # Contact ESP32 WebServer to trigger buzzer
     global esp32_ip
     if esp32_ip:
-        try:
-            # We call the ESP32's lightweight webserver
-            requests.post(f"http://{esp32_ip}/buzzer", timeout=2)
-            app.logger.info("Sent buzzer command to ESP32 at %s", esp32_ip)
-        except Exception as e:
-            app.logger.error("Failed to reach ESP32 for buzzer: %s", e)
+        fire_and_forget_esp32_post(f"http://{esp32_ip}/buzzer")
+        app.logger.info("Sent buzzer command to ESP32 at %s", esp32_ip)
 
     app.logger.info("Buzzer beep requested by %s", user["username"])
     socketio.emit(
@@ -346,6 +355,16 @@ def update_notifications_setting():
     notifications_enabled = bool(payload.get("enabled", True))
     app.logger.info("Notifications enabled set to: %s", notifications_enabled)
     return jsonify({"message": "Settings updated", "enabled": notifications_enabled})
+
+
+@app.route("/api/settings/autotracking", methods=["POST"])
+def update_autotracking_setting():
+    """Update the backend auto-tracking setting based on frontend switch."""
+    global autotracking_enabled
+    payload = request.get_json(silent=True) or {}
+    autotracking_enabled = bool(payload.get("enabled", False))
+    app.logger.info("Auto-tracking enabled set to: %s", autotracking_enabled)
+    return jsonify({"message": "Settings updated", "enabled": autotracking_enabled})
 
 
 @socketio.on("connect")
@@ -417,11 +436,8 @@ def on_camera_move(payload):
 
     global esp32_ip
     if esp32_ip:
-        try:
-            requests.post(f"http://{esp32_ip}/move", json={"direction": direction}, timeout=2)
-            app.logger.info("Sent move command to ESP32 at %s via socket: %s", esp32_ip, direction)
-        except Exception as e:
-            app.logger.error("Failed to reach ESP32 for move: %s", e)
+        fire_and_forget_esp32_post(f"http://{esp32_ip}/move", json_data={"direction": direction})
+        app.logger.info("Sent move command to ESP32 at %s via socket: %s", esp32_ip, direction)
 
     app.logger.info("Camera move requested by %s via socket: %s", user["username"], direction)
     socketio.emit(
@@ -445,11 +461,8 @@ def on_trigger_buzzer(_payload=None):
     # Contact ESP32 WebServer to trigger buzzer
     global esp32_ip
     if esp32_ip:
-        try:
-            requests.post(f"http://{esp32_ip}/buzzer", timeout=2)
-            app.logger.info("Sent buzzer command to ESP32 at %s via socket", esp32_ip)
-        except Exception as e:
-            app.logger.error("Failed to reach ESP32 for buzzer: %s", e)
+        fire_and_forget_esp32_post(f"http://{esp32_ip}/buzzer")
+        app.logger.info("Sent buzzer command to ESP32 at %s via socket", esp32_ip)
 
     app.logger.info("Buzzer trigger requested by %s via socket", user["username"])
     socketio.emit(
