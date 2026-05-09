@@ -64,6 +64,69 @@ volatile bool motionDetected = false;
 // ======================== WEB SERVER =======================
 WebServer server(80);
 
+// ======================== I2C & PCA9685 ========================
+#define I2C_SDA 15             // Pinul de Date I2C (Serial Data) al ESP32
+#define I2C_SCL 14             // Pinul de Ceas I2C (Serial Clock) al ESP32
+#define PCA9685_ADDR 0x40      // Adresa I2C hardware implicita a modulului PCA9685
+
+#define PCA9685_MODE1     0x00 // Adresa registrului principal de configurare (Mode 1)
+#define PCA9685_PRESCALE  0xFE // Adresa registrului pentru prescaler PWM
+#define LED0_ON_L         0x06 // Adresa de start pentru canalul 0. Fiecare canal ocupa cate 4 registri succesivi.
+
+#define SERVO_MIN   102        // Numarul de pasi "ticks" pentru 0 grade (aprox 500us latime puls) din cei 4096 pasi ai ciclului
+#define SERVO_MAX   491        // Numarul de "ticks" pentru 180 grade (aprox 2400us latime puls)
+
+int currentPan = 90;
+int currentTilt = 10; 
+
+
+void pca9685WriteReg(uint8_t reg, uint8_t value) {
+  Wire.beginTransmission(PCA9685_ADDR); // Initiaza comunicarea I2C tintind adresa hardware a cipului (0x40)
+  Wire.write(reg);                      // Trimite pe bus adresa registrului intern pe care vrem sa il modificam
+  Wire.write(value);                    // Trimite valoarea (octetul) ce va fi scrisa efectiv in acel registru
+  Wire.endTransmission();               // Emite semnalul de STOP pe I2C si elibereaza magistrala de date
+}
+
+uint8_t pca9685ReadReg(uint8_t reg) {
+  Wire.beginTransmission(PCA9685_ADDR); // Initiaza comunicarea I2C pentru a seta pointerul de registru
+  Wire.write(reg);                      // Scrie adresa registrului pe care vrem sa il citim
+  Wire.endTransmission();               // Incheie transmisia preliminara de setare a adresei
+  Wire.requestFrom(PCA9685_ADDR, (uint8_t)1); // Preia controlul liniei de date si cere cipului 1 byte inapoi
+  return Wire.read();                   // Citeste acel byte primit prin I2C si il returneaza
+}
+
+bool pca9685Init() {
+  pca9685WriteReg(PCA9685_MODE1, 0x00); // Scrie 0x00 in MODE1 pentru a opri functiile speciale si a asigura starea activa (trezit)
+  delay(5);                             // Asteapta 5ms pentru ca oscilatorul intern al PCA9685 sa se stabilizeze la pornire
+  uint8_t mode1 = pca9685ReadReg(PCA9685_MODE1); // Citeste inapoi registrul MODE1 pentru a testa prezenta cipului
+  if (mode1 == 0xFF) return false;      // 0xFF (255) semnifica ca firele SDA/SCL sunt libere (trase HIGH), cipul nu raspunde
+
+  uint8_t prescale = 121;               // Valoarea calculata pentru a forta oscilatorul la frecventa de 50Hz (25MHz / (4096 * 50) - 1)
+  uint8_t oldMode = pca9685ReadReg(PCA9685_MODE1); // Salveaza configuratia existenta a registrului MODE1
+  pca9685WriteReg(PCA9685_MODE1, (oldMode & 0x7F) | 0x10); // Forteaza cipul in mod SLEEP (bit 4 HIGH), o conditie fizica impusa pt. schimbarea frecventei
+  pca9685WriteReg(PCA9685_PRESCALE, prescale);             // Scrie divizorul de 121 in registrul hardware PRESCALE
+  pca9685WriteReg(PCA9685_MODE1, oldMode);                 // Iese din modul SLEEP prin rescrierea bitului 4 inapoi in 0
+  delay(5);                             // Asteapta din nou 5ms pentru restartarea corecta a oscilatorului intern la 50Hz
+  pca9685WriteReg(PCA9685_MODE1, oldMode | 0xA0);          // Seteaza Auto-Increment (bit 5) pt viteza si declanseaza Restart (bit 7)
+  return true;                          // Initializarea s-a terminat cu succes
+}
+
+void servoWrite(uint8_t canal, uint16_t ticks) {
+  uint8_t reg = LED0_ON_L + (canal * 4); // Calculeaza adresa registrului ON_L pt canalul cerut (se inmulteste cu 4 pt ca fiecare canal are 4 registri de cate 8 biti)
+  Wire.beginTransmission(PCA9685_ADDR);  // Deschide sesiunea de scriere I2C
+  Wire.write(reg);                       // Trimite adresa de pornire. Pt ca am activat Auto-Increment, urmatorii 4 bytes curg direct in pachetele adiacente.
+  Wire.write(0);                         // Scrie ON_L (low byte de START): Semnalul porneste la momentul 0 din ciclul de 20ms
+  Wire.write(0);                         // Scrie ON_H (high byte de START): Ramane 0.
+  Wire.write(ticks & 0xFF);              // Scrie OFF_L (low byte de STOP): Taie semnalul PWM la valoarea extrasa prin aplicarea mastii pentru primii 8 biti
+  Wire.write(ticks >> 8);                // Scrie OFF_H (high byte de STOP): Shiftare pt a extrage bitii ramasi ai valorii 'ticks' care guverneaza stingerea semnalului
+  Wire.endTransmission();                // Inchide comunicarea, modificand curentul efectiv scos pe pinii hardware PCA9685
+}
+
+uint16_t gradeLaTicks(int grade) {
+  // Executa maparea liniara a valorilor: din plaja de intrari 0-180 grade in plaja hardware de iesiri 102-491 ticks
+  return SERVO_MIN + (uint16_t)((float)grade / 180.0 * (SERVO_MAX - SERVO_MIN));
+}
+
 // ======================== INTRERUPERI ==========================
 // Functia executata la intrerupere, tinuta in RAM (IRAM_ATTR) pentru viteza
 void IRAM_ATTR pirInterrupt(void* arg) {
@@ -298,6 +361,17 @@ void setup() {
     ESP.restart();
   }
 
+  // Initializare PCA9685
+  Wire.begin(I2C_SDA, I2C_SCL);
+  if (pca9685Init()) {
+    Serial.println("PCA9685 initializat cu succes.");
+    // Seteaza pozitiile initiale
+    servoWrite(0, gradeLaTicks(currentPan));
+    servoWrite(1, gradeLaTicks(currentTilt));
+  } else {
+    Serial.println("Eroare la initializare PCA9685!");
+  }
+
   // Conectare WiFi
   connectWiFi();
 
@@ -306,7 +380,7 @@ void setup() {
     server.send(200, "application/json", "{\"status\":\"ok\"}");
     Serial.println("Comanda buzzer primita de la backend!");
     
-    // Distrage atentia pisicii
+    // Distrage atentia animalului de companie
     // Folosim structura globala GPIO pentru a seta sau reseta bitul
     GPIO.out_w1ts = (1 << BUZZER_PIN); // Set HIGH
     delay(150);
@@ -316,6 +390,38 @@ void setup() {
     delay(150);
     GPIO.out_w1tc = (1 << BUZZER_PIN); // Set LOW
   });
+
+  server.on("/move", HTTP_POST, []() {
+    if (server.hasArg("plain") == false) {
+      server.send(400, "application/json", "{\"status\":\"error\", \"message\":\"No body\"}");
+      return;
+    }
+    String body = server.arg("plain");
+    Serial.println("Comanda move primita: " + body);
+    
+    int step = 10;
+    if (body.indexOf("up") != -1) {
+      currentTilt -= step; 
+    } else if (body.indexOf("down") != -1) {
+      currentTilt += step;
+    } else if (body.indexOf("left") != -1) {
+      currentPan += step; 
+    } else if (body.indexOf("right") != -1) {
+      currentPan -= step;
+    }
+    
+    // Asigura-te ca ramanem in limitele fizice (0-180 grade)
+    if (currentPan < 0) currentPan = 0;
+    if (currentPan > 180) currentPan = 180;
+    if (currentTilt < 0) currentTilt = 0;
+    if (currentTilt > 180) currentTilt = 180;
+
+    servoWrite(0, gradeLaTicks(currentPan));
+    servoWrite(1, gradeLaTicks(currentTilt));
+    
+    server.send(200, "application/json", "{\"status\":\"ok\"}");
+  });
+
   server.begin();
   Serial.println("HTTP Server pornit pe portul 80!");
 

@@ -4,6 +4,7 @@ from threading import Lock
 import base64
 import json
 import os
+import requests
 
 from flask import Flask, Response, jsonify, request, session
 from flask_cors import CORS
@@ -246,7 +247,14 @@ def camera_move():
     if direction not in allowed_directions:
         return jsonify({"message": "Direction must be one of: up, down, left, right"}), 400
 
-    # Placeholder for future camera hardware integration.
+    global esp32_ip
+    if esp32_ip:
+        try:
+            requests.post(f"http://{esp32_ip}/move", json={"direction": direction}, timeout=2)
+            app.logger.info("Sent move command to ESP32 at %s: %s", esp32_ip, direction)
+        except Exception as e:
+            app.logger.error("Failed to reach ESP32 for move: %s", e)
+
     app.logger.info("Camera move requested by %s: %s", user["username"], direction)
     socketio.emit(
         "camera_command",
@@ -270,7 +278,6 @@ def buzzer_beep():
     # Contact ESP32 WebServer to trigger buzzer
     global esp32_ip
     if esp32_ip:
-        import requests
         try:
             # We call the ESP32's lightweight webserver
             requests.post(f"http://{esp32_ip}/buzzer", timeout=2)
@@ -408,6 +415,14 @@ def on_camera_move(payload):
     if direction not in allowed_directions:
         return {"ok": False, "message": "Direction must be one of: up, down, left, right"}
 
+    global esp32_ip
+    if esp32_ip:
+        try:
+            requests.post(f"http://{esp32_ip}/move", json={"direction": direction}, timeout=2)
+            app.logger.info("Sent move command to ESP32 at %s via socket: %s", esp32_ip, direction)
+        except Exception as e:
+            app.logger.error("Failed to reach ESP32 for move: %s", e)
+
     app.logger.info("Camera move requested by %s via socket: %s", user["username"], direction)
     socketio.emit(
         "camera_command",
@@ -430,7 +445,6 @@ def on_trigger_buzzer(_payload=None):
     # Contact ESP32 WebServer to trigger buzzer
     global esp32_ip
     if esp32_ip:
-        import requests
         try:
             requests.post(f"http://{esp32_ip}/buzzer", timeout=2)
             app.logger.info("Sent buzzer command to ESP32 at %s via socket", esp32_ip)
