@@ -314,7 +314,7 @@ export function CameraStream() {
           return;
         }
 
-        toast.success("Buzzer signal sent to backend 🔊");
+        toast.success("Buzzer signal 🔊");
         return;
       }
 
@@ -329,7 +329,7 @@ export function CameraStream() {
         return;
       }
 
-      toast.success("Buzzer signal sent to backend 🔊");
+      toast.success("Buzzer signal 🔊");
     } catch {
       toast.error("Could not reach backend buzzer endpoint.");
     } finally {
@@ -521,46 +521,19 @@ export function CameraStream() {
                 </div>
               </CardContent>
             </Card>
-
-            <Button
-              type="button"
-              onClick={handleBuzzerTrigger}
-              disabled={isTriggeringBuzzer}
-              className="w-full sm:w-auto border-0 bg-gradient-to-r from-pink-500 to-purple-500 text-white shadow-md transition-all hover:from-pink-600 hover:to-purple-600 hover:shadow-lg focus-visible:ring-pink-300 disabled:opacity-70"
-            >
-              <Bell className="size-4 mr-2" />
-              {isTriggeringBuzzer ? "Sending buzzer signal..." : "Make a sound (distract cat)"}
-            </Button>
-
           </div>
 
           {/* Sidebar */}
           <div className="space-y-4">
-            {/* Activity Log */}
-            <Card className="border-2 border-purple-200">
-              <CardHeader className="bg-gradient-to-r from-pink-50 to-purple-50">
-                <CardTitle className="flex items-center gap-2">
-                  <PawPrint className="size-5 text-pink-500" />
-                  Recent Activity
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="pt-4">
-                {activity.length > 0 ? (
-                  <div className="space-y-2">
-                    {activity.map((act, idx) => (
-                      <div
-                        key={idx}
-                        className="flex items-center gap-2 p-2 bg-purple-50 rounded text-sm"
-                      >
-                        {act}
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <p className="text-gray-500 text-sm">No recent activity detected</p>
-                )}
-              </CardContent>
-            </Card>
+            <Button
+              type="button"
+              onClick={handleBuzzerTrigger}
+              disabled={isTriggeringBuzzer}
+              className="w-full border-0 bg-gradient-to-r from-pink-500 to-purple-500 text-white shadow-md transition-all hover:from-pink-600 hover:to-purple-600 hover:shadow-lg focus-visible:ring-pink-300 disabled:opacity-70"
+            >
+              <Bell className="size-4 mr-2" />
+              {isTriggeringBuzzer ? "Sending buzzer signal..." : "Make a sound (distract cat)"}
+            </Button>
 
             {/* Settings */}
             <Card className="border-2 border-purple-200">
@@ -596,6 +569,32 @@ export function CameraStream() {
                     }}
                   />
                 </div>
+              </CardContent>
+            </Card>
+
+            {/* Activity Log */}
+            <Card className="border-2 border-purple-200">
+              <CardHeader className="bg-gradient-to-r from-pink-50 to-purple-50">
+                <CardTitle className="flex items-center gap-2">
+                  <PawPrint className="size-5 text-pink-500" />
+                  Recent Activity
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="pt-4">
+                {activity.length > 0 ? (
+                  <div className="space-y-2">
+                    {activity.map((act, idx) => (
+                      <div
+                        key={idx}
+                        className="flex items-center gap-2 p-2 bg-purple-50 rounded text-sm"
+                      >
+                        {act}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-gray-500 text-sm">No recent activity detected</p>
+                )}
               </CardContent>
             </Card>
           </div>

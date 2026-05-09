@@ -8,6 +8,7 @@
 #include "soc/soc.h"
 #include "soc/gpio_reg.h"
 #include "soc/io_mux_reg.h"
+#include <WebServer.h>
 
 // ======================= CONFIGURARE =======================
 // WiFi
@@ -55,18 +56,23 @@ unsigned long lastFrameTime = 0;
 unsigned long frameCount = 0;
 unsigned long fpsTimer = 0;
 
-// ======================== SENZORI ==========================
+// ======================== SENZORI & BUZZER ==========================
 #define PIR_PIN 13
+#define BUZZER_PIN 4
 volatile bool motionDetected = false;
 
+// ======================== WEB SERVER =======================
+WebServer server(80);
+
+// ======================== INTRERUPERI ==========================
 // Functia executata la intrerupere, tinuta in RAM (IRAM_ATTR) pentru viteza
 void IRAM_ATTR pirInterrupt(void* arg) {
-  // Citim starea tuturor intreruperilor GPIO si aplicam o masca pentru a izola pinul 13
-  if (REG_READ(GPIO_STATUS_REG) & (1 << PIR_PIN)) {
+  // Citim starea tuturor intreruperilor GPIO folosind structura globala
+  if (GPIO.status & (1 << PIR_PIN)) {
     motionDetected = true;
     
-    // Scriem 1 in registrul de clear la pozitia bitului 13 pentru a reseta flag-ul intreruperii hardware
-    REG_WRITE(GPIO_STATUS_W1TC_REG, (1 << PIR_PIN));
+    // Scriem 1 in registrul de clear la pozitia bitului 13 pentru a reseta flag-ul intreruperii
+    GPIO.status_w1tc = (1 << PIR_PIN);
   }
 }
 
@@ -242,13 +248,14 @@ void setup() {
   // --- Configurare senzor PIR ---
   
   // Setam functia de baza GPIO, activam functionalitatea de input si pull-down in multiplexorul pinului 13
-  REG_WRITE(IO_MUX_GPIO13_REG, (2 << MCU_SEL_S) | FUN_IE | FUN_PD);
+  // Pentru IO_MUX nu exista o structura similara, asa ca procedam pur cu pointeri dereferentiati:
+  *((volatile uint32_t *)IO_MUX_GPIO13_REG) = (2 << MCU_SEL_S) | FUN_IE | FUN_PD;
   
-  // Oprim driver-ul de output pentru pinul 13 scriind 1 la pozitia aferenta in registrul de dezactivare a iesirii
-  REG_WRITE(GPIO_ENABLE_W1TC_REG, (1 << PIR_PIN));
+  // Oprim driver-ul de output pentru pinul 13 scriind 1 la pozitia aferenta
+  GPIO.enable_w1tc = (1 << PIR_PIN);
   
   // Citim starea curenta a configuratiei pinului 13 intr-o variabila temporara
-  uint32_t pin_config = REG_READ(GPIO_PIN13_REG);
+  uint32_t pin_config = GPIO.pin[PIR_PIN].val;
   
   // Stergem bitii care controleaza tipul de intrerupere aplicand o masca logica AND NOT
   pin_config &= ~GPIO_PIN_INT_TYPE_M;
@@ -257,13 +264,24 @@ void setup() {
   pin_config |= (GPIO_INTR_POSEDGE << GPIO_PIN_INT_TYPE_S);
   
   // Scriem configuratia modificata inapoi in registrul pinului 13
-  REG_WRITE(GPIO_PIN13_REG, pin_config);
+  GPIO.pin[PIR_PIN].val = pin_config;
   
   // Initializam serviciul global de gestionare a intreruperilor pe GPIO
   gpio_install_isr_service(0);
   
   // Atasam functia handler creata anterior la evenimentele pinului 13
   gpio_isr_handler_add((gpio_num_t)PIR_PIN, pirInterrupt, NULL);
+
+  // --- Configurare Buzzer (VCC control prin GPIO4) ---
+  // Setam IO MUX pentru pinul 4: functia GPIO (MCU_SEL = 0), activam pull-down (FUN_PD),
+  // si setam drive capability la valoarea 3 (pozitionat pe bitul 10).
+  *((volatile uint32_t *)IO_MUX_GPIO4_REG) = (0 << MCU_SEL_S) | (3 << 10) | FUN_PD;
+
+  // Activam driver-ul de output pentru pinul 4
+  GPIO.enable_w1ts = (1 << BUZZER_PIN);
+
+  // Buzzer OPRIT (stare LOW) - Scriem 1 in registrul W1TC
+  GPIO.out_w1tc = (1 << BUZZER_PIN);
 
   // Construim URL-ul backend
   backendUrl = String("http://") + BACKEND_HOST + ":" +
@@ -283,12 +301,33 @@ void setup() {
   // Conectare WiFi
   connectWiFi();
 
+  // Configurare Server HTTP pe ESP32
+  server.on("/buzzer", HTTP_POST, []() {
+    server.send(200, "application/json", "{\"status\":\"ok\"}");
+    Serial.println("Comanda buzzer primita de la backend!");
+    
+    // Distrage atentia pisicii
+    // Folosim structura globala GPIO pentru a seta sau reseta bitul
+    GPIO.out_w1ts = (1 << BUZZER_PIN); // Set HIGH
+    delay(150);
+    GPIO.out_w1tc = (1 << BUZZER_PIN); // Set LOW
+    delay(100);
+    GPIO.out_w1ts = (1 << BUZZER_PIN); // Set HIGH
+    delay(150);
+    GPIO.out_w1tc = (1 << BUZZER_PIN); // Set LOW
+  });
+  server.begin();
+  Serial.println("HTTP Server pornit pe portul 80!");
+
   fpsTimer = millis();
   Serial.println("Setup complet - incep streaming-ul!\n");
 }
 
 // ========================= LOOP ============================
 void loop() {
+  // Procesare cereri HTTP catre ESP32 (ex: /buzzer)
+  server.handleClient();
+
   // --- Procesare Senzor PIR ---
   static unsigned long lastMotionDetectionTime = 0;
   if (motionDetected) {

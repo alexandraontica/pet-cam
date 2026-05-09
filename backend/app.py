@@ -57,6 +57,7 @@ latest_frame_timestamp: str | None = None
 
 stream_subscribers: set[str] = set()
 stream_state_lock = Lock()
+esp32_ip: str | None = None
 
 
 def ensure_storage() -> None:
@@ -147,6 +148,9 @@ def health():
 @app.route("/api/camera/frame", methods=["POST"])
 def receive_camera_frame():
     """Receive a JPEG frame from the ESP32-CAM."""
+    global esp32_ip
+    esp32_ip = request.remote_addr
+
     jpeg_bytes = request.get_data()
     if not jpeg_bytes:
         return jsonify({"message": "No image data received"}), 400
@@ -263,7 +267,17 @@ def buzzer_beep():
         message, status = auth_error
         return jsonify(message), status
 
-    # Placeholder for future buzzer hardware integration.
+    # Contact ESP32 WebServer to trigger buzzer
+    global esp32_ip
+    if esp32_ip:
+        import requests
+        try:
+            # We call the ESP32's lightweight webserver
+            requests.post(f"http://{esp32_ip}/buzzer", timeout=2)
+            app.logger.info("Sent buzzer command to ESP32 at %s", esp32_ip)
+        except Exception as e:
+            app.logger.error("Failed to reach ESP32 for buzzer: %s", e)
+
     app.logger.info("Buzzer beep requested by %s", user["username"])
     socketio.emit(
         "buzzer_signal",
@@ -412,6 +426,16 @@ def on_trigger_buzzer(_payload=None):
     user, auth_error = require_authenticated_user()
     if auth_error:
         return {"ok": False, "message": "Authentication required"}
+
+    # Contact ESP32 WebServer to trigger buzzer
+    global esp32_ip
+    if esp32_ip:
+        import requests
+        try:
+            requests.post(f"http://{esp32_ip}/buzzer", timeout=2)
+            app.logger.info("Sent buzzer command to ESP32 at %s via socket", esp32_ip)
+        except Exception as e:
+            app.logger.error("Failed to reach ESP32 for buzzer: %s", e)
 
     app.logger.info("Buzzer trigger requested by %s via socket", user["username"])
     socketio.emit(
