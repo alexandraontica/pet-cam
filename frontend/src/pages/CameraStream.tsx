@@ -44,6 +44,7 @@ export function CameraStream() {
   const [currentUser, setCurrentUser] = useState<CurrentUser | null>(null);
   const [isStreaming, setIsStreaming] = useState(true);
   const [motionDetection, setMotionDetection] = useState(true);
+  const [autoTracking, setAutoTracking] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isTriggeringBuzzer, setIsTriggeringBuzzer] = useState(false);
   const [isSocketConnected, setIsSocketConnected] = useState(false);
@@ -265,6 +266,20 @@ export function CameraStream() {
   };
 
   const handleCameraMove = async (direction: "up" | "down" | "left" | "right") => {
+    if (autoTracking) {
+      setAutoTracking(false);
+      toast.info("Auto-tracking disabled by manual override 🛑");
+      try {
+        await fetch("/api/settings/autotracking", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: false }),
+        });
+      } catch {
+        toast.error("Could not sync auto-tracking settings with backend.");
+      }
+    }
+
     try {
       if (isSocketConnected) {
         const socketResponse = await emitSocketEvent<{ ok?: boolean; message?: string }>("camera_move", {
@@ -565,6 +580,31 @@ export function CameraStream() {
                         });
                       } catch {
                         toast.error("Could not sync notification settings with backend.");
+                      }
+                    }}
+                  />
+                </div>
+                <div className="flex items-center justify-between">
+                  <Label htmlFor="auto-tracking" className="flex items-center gap-2 cursor-pointer">
+                    <Video className="size-4 text-purple-500" />
+                    Auto-tracking
+                  </Label>
+                  <Switch
+                    id="auto-tracking"
+                    checked={autoTracking}
+                    onCheckedChange={async (checked) => {
+                      setAutoTracking(checked);
+                      toast.info(
+                        checked ? "Auto-tracking enabled 🎯" : "Auto-tracking disabled 🛑"
+                      );
+                      try {
+                        await fetch("/api/settings/autotracking", {
+                          method: "POST",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({ enabled: checked }),
+                        });
+                      } catch {
+                        toast.error("Could not sync auto-tracking settings with backend.");
                       }
                     }}
                   />
