@@ -379,6 +379,17 @@ def update_autotracking_setting():
     return jsonify({"message": "Settings updated", "enabled": autotracking_enabled})
 
 
+@app.route("/api/settings/autotracking/sync", methods=["POST"])
+def sync_autotracking_setting():
+    """Sync autotracking state from ESP32 back to frontend."""
+    global autotracking_enabled
+    payload = request.get_json(silent=True) or {}
+    autotracking_enabled = bool(payload.get("enabled", False))
+    app.logger.info("Auto-tracking synced from ESP32 to: %s", autotracking_enabled)
+    socketio.emit("autotracking_state", {"enabled": autotracking_enabled})
+    return jsonify({"message": "Settings synced", "enabled": autotracking_enabled})
+
+
 @socketio.on("connect")
 def on_connect():
     """Handle new Socket.IO connection. Reject unauthenticated clients."""

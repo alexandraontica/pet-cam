@@ -149,11 +149,19 @@ export function CameraStream() {
       toast.error(data.message || "Camera stream error on backend.");
     };
 
+    const onAutotrackingState = (data: { enabled: boolean }) => {
+      setAutoTracking(data.enabled);
+      if (!data.enabled) {
+        toast.success("Autotracking scan completed! 🎯");
+      }
+    };
+
     socket.on("connect", onConnect);
     socket.on("disconnect", onDisconnect);
     socket.on("motion_signal", onMotionSignal);
     socket.on("camera_frame", onCameraFrame);
     socket.on("camera_stream_error", onCameraStreamError);
+    socket.on("autotracking_state", onAutotrackingState);
 
     return () => {
       if (socket.connected && streamSubscribedRef.current) {
@@ -165,6 +173,7 @@ export function CameraStream() {
       socket.off("motion_signal", onMotionSignal);
       socket.off("camera_frame", onCameraFrame);
       socket.off("camera_stream_error", onCameraStreamError);
+      socket.off("autotracking_state", onAutotrackingState);
       socket.disconnect();
       socketRef.current = null;
       setIsSocketConnected(false);

@@ -3,6 +3,7 @@
 #include <HTTPClient.h>
 #include <SPI.h>
 #include <Wire.h>
+#include <Adafruit_VL53L0X.h>
 #include "esp_camera.h"
 #include "img_converters.h"  // fmt2jpg() - conversie RGB565 -> JPEG
 #include "soc/soc.h"
@@ -20,9 +21,9 @@
 #define BACKEND_PORT 5000
 #define FRAME_ENDPOINT "/api/camera/frame"
 #define MOTION_ENDPOINT "/api/motion"
+#define AUTOTRACKING_STATUS_ENDPOINT "/api/settings/autotracking/sync"
 
-// Interval intre cadre (ms). 200ms ~ 5 FPS — compromis bun
-// intre fluiditate si ce poate duce ESP32-ul cu conversie RGB->JPEG.
+// Interval intre cadre (ms)
 #define CAPTURE_INTERVAL_MS 200
 
 // Calitate JPEG la conversie (0-100, mai mare = mai buna calitate, mai mult traffic)
@@ -52,6 +53,7 @@
 // ======================== GLOBALS ==========================
 String backendUrl;
 String motionUrl;
+String autotrackingStatusUrl;
 unsigned long lastFrameTime = 0;
 unsigned long frameCount = 0;
 unsigned long fpsTimer = 0;
@@ -59,6 +61,7 @@ unsigned long fpsTimer = 0;
 // ======================== SENZORI & BUZZER ==========================
 #define PIR_PIN 13
 #define BUZZER_PIN 4
+
 volatile bool motionDetected = false;
 
 int buzzerState = 0;
@@ -66,6 +69,22 @@ unsigned long buzzerStartTime = 0;
 
 // ======================== WEB SERVER =======================
 WebServer server(80);
+
+// ======================== AUTOTRACKING & SENZOR DISTANTA ========================
+Adafruit_VL53L0X lox = Adafruit_VL53L0X();
+bool loxInitialized = false;
+
+bool autotrackingEnabled = false;
+bool isScanning = false;
+int scanPan = 0;
+int scanTilt = 0;
+int scanPanDir = 10;
+int scanTiltStep = 10;
+uint16_t minDistance = 8190;
+int bestPan = 110;
+int bestTilt = 10;
+unsigned long lastScanMoveTime = 0;
+unsigned long lastScanCompleteTime = 0;
 
 // ======================== I2C & PCA9685 ========================
 #define I2C_SDA 15             // Pinul de Date I2C (Serial Data) al ESP32
@@ -79,7 +98,7 @@ WebServer server(80);
 #define SERVO_MIN   102        // Numarul de pasi "ticks" pentru 0 grade (aprox 500us latime puls) din cei 4096 pasi ai ciclului
 #define SERVO_MAX   491        // Numarul de "ticks" pentru 180 grade (aprox 2400us latime puls)
 
-int currentPan = 90;
+int currentPan = 110;
 int currentTilt = 10; 
 
 
@@ -354,6 +373,8 @@ void setup() {
                String(BACKEND_PORT) + FRAME_ENDPOINT;
   motionUrl = String("http://") + BACKEND_HOST + ":" +
               String(BACKEND_PORT) + MOTION_ENDPOINT;
+  autotrackingStatusUrl = String("http://") + BACKEND_HOST + ":" +
+                          String(BACKEND_PORT) + AUTOTRACKING_STATUS_ENDPOINT;
   Serial.printf("Backend URL: %s\n", backendUrl.c_str());
   Serial.printf("Motion URL: %s\n", motionUrl.c_str());
 
@@ -373,6 +394,14 @@ void setup() {
     servoWrite(1, gradeLaTicks(currentTilt));
   } else {
     Serial.println("Eroare la initializare PCA9685!");
+  }
+
+  if (!lox.begin(0x29, false, &Wire)) {
+    Serial.println(F("Eroare la initializare VL53L0X!"));
+    loxInitialized = false;
+  } else {
+    Serial.println(F("VL53L0X initializat cu succes."));
+    loxInitialized = true;
   }
 
   // Conectare WiFi
@@ -408,7 +437,8 @@ void setup() {
     } else if (body.indexOf("right") != -1) {
       currentPan -= step;
     }
-    
+    Serial.printf("currentPan: %d, currentTilt: %d\n", currentPan, currentTilt);
+
     // Asigura-te ca ramanem in limitele fizice (0-180 grade)
     if (currentPan < 0) currentPan = 0;
     if (currentPan > 180) currentPan = 180;
@@ -430,8 +460,23 @@ void setup() {
     
     if (body.indexOf("true") != -1) {
       Serial.println("Autotracking is ON");
+      autotrackingEnabled = true;
+      isScanning = true;
+      scanPan = 0;
+      scanTilt = 0;
+      scanPanDir = 10;
+      minDistance = 8190;
+      bestPan = 110;
+      bestTilt = 10;
+      currentPan = scanPan;
+      currentTilt = scanTilt;
+      servoWrite(0, gradeLaTicks(currentPan));
+      servoWrite(1, gradeLaTicks(currentTilt));
+      lastScanMoveTime = millis();
     } else {
       Serial.println("Autotracking is OFF");
+      autotrackingEnabled = false;
+      isScanning = false;
     }
     
     server.send(200, "application/json", "{\"status\":\"ok\"}");
@@ -470,17 +515,96 @@ void loop() {
   // --- Procesare Buzzer (Non-Blocking) ---
   if (buzzerState > 0) {
     unsigned long currentMillis = millis();
-    if (buzzerState == 1 && currentMillis - buzzerStartTime >= 150) {
+    if (buzzerState == 1 && currentMillis - buzzerStartTime >= 30) {
       GPIO.out_w1tc = (1 << BUZZER_PIN); // Set LOW
       buzzerState = 2;
       buzzerStartTime = currentMillis;
-    } else if (buzzerState == 2 && currentMillis - buzzerStartTime >= 100) {
+    } else if (buzzerState == 2 && currentMillis - buzzerStartTime >= 10) {
       GPIO.out_w1ts = (1 << BUZZER_PIN); // Set HIGH
       buzzerState = 3;
       buzzerStartTime = currentMillis;
-    } else if (buzzerState == 3 && currentMillis - buzzerStartTime >= 150) {
+    } else if (buzzerState == 3 && currentMillis - buzzerStartTime >= 30) {
       GPIO.out_w1tc = (1 << BUZZER_PIN); // Set LOW
       buzzerState = 0; // Finalizat
+    }
+  }
+
+  // --- Procesare Autotracking ---
+  if (autotrackingEnabled) {
+    unsigned long currentMillis = millis();
+    
+    if (!isScanning) {
+      if (currentMillis - lastScanCompleteTime >= 5000) { // Pauza de 5s intre scanari
+        isScanning = true;
+        scanPan = 0;
+        scanTilt = 0;
+        scanPanDir = 10;
+        minDistance = 8190;
+        bestPan = 110;
+        bestTilt = 10;
+        currentPan = scanPan;
+        currentTilt = scanTilt;
+        servoWrite(0, gradeLaTicks(currentPan));
+        servoWrite(1, gradeLaTicks(currentTilt));
+        lastScanMoveTime = currentMillis;
+      }
+    } else {
+      if (currentMillis - lastScanMoveTime >= 150) { // 150ms per pas pt citire stabila si miscare mecanica
+        lastScanMoveTime = currentMillis;
+        
+        // Citire senzor
+        if (loxInitialized) {
+          VL53L0X_RangingMeasurementData_t measure;
+          lox.rangingTest(&measure, false);
+          if (measure.RangeStatus != 4 && measure.RangeMilliMeter > 0) {
+            if (measure.RangeMilliMeter < minDistance) {
+              minDistance = measure.RangeMilliMeter;
+              bestPan = currentPan;
+              bestTilt = currentTilt;
+            }
+          }
+        }
+        
+        // Miscare motoare
+        scanPan += scanPanDir;
+        if (scanPan > 180 || scanPan < 0) {
+          scanPanDir = -scanPanDir;
+          scanPan += scanPanDir; // Corectie pentru a ramane in 0-180
+          scanTilt += scanTiltStep;
+          
+          if (scanTilt > 40) {
+            // Sfarsit scanare
+            isScanning = false;
+            autotrackingEnabled = false; // Opreste autotracking-ul complet
+            lastScanCompleteTime = currentMillis;
+            
+            if (minDistance == 8190) {
+              currentPan = 110;
+              currentTilt = 10;
+            } else {
+              currentPan = bestPan;
+              currentTilt = bestTilt;
+            }
+            servoWrite(0, gradeLaTicks(currentPan));
+            servoWrite(1, gradeLaTicks(currentTilt));
+            Serial.printf("Sfarsit scanare. MinDist: %d, Pan: %d, Tilt: %d\n", minDistance, currentPan, currentTilt);
+            
+            // Anunta backend-ul
+            HTTPClient http;
+            http.begin(autotrackingStatusUrl);
+            http.addHeader("Content-Type", "application/json");
+            http.setTimeout(1000);
+            http.POST("{\"enabled\": false}");
+            http.end();
+          } else {
+            currentTilt = scanTilt;
+            servoWrite(1, gradeLaTicks(currentTilt));
+          }
+        } else {
+          currentPan = scanPan;
+          servoWrite(0, gradeLaTicks(currentPan));
+        }
+      }
     }
   }
 
