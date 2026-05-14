@@ -354,6 +354,12 @@ def update_notifications_setting():
     payload = request.get_json(silent=True) or {}
     notifications_enabled = bool(payload.get("enabled", True))
     app.logger.info("Notifications enabled set to: %s", notifications_enabled)
+
+    global esp32_ip
+    if esp32_ip:
+        fire_and_forget_esp32_post(f"http://{esp32_ip}/notifications", json_data={"enabled": notifications_enabled})
+        app.logger.info("Sent notifications setting to ESP32 at %s: %s", esp32_ip, notifications_enabled)
+
     return jsonify({"message": "Settings updated", "enabled": notifications_enabled})
 
 
@@ -364,6 +370,12 @@ def update_autotracking_setting():
     payload = request.get_json(silent=True) or {}
     autotracking_enabled = bool(payload.get("enabled", False))
     app.logger.info("Auto-tracking enabled set to: %s", autotracking_enabled)
+
+    global esp32_ip
+    if esp32_ip:
+        fire_and_forget_esp32_post(f"http://{esp32_ip}/autotracking", json_data={"enabled": autotracking_enabled})
+        app.logger.info("Sent autotracking command to ESP32 at %s: %s", esp32_ip, autotracking_enabled)
+
     return jsonify({"message": "Settings updated", "enabled": autotracking_enabled})
 
 

@@ -421,6 +421,40 @@ void setup() {
     server.send(200, "application/json", "{\"status\":\"ok\"}");
   });
 
+  server.on("/autotracking", HTTP_POST, []() {
+    if (server.hasArg("plain") == false) {
+      server.send(400, "application/json", "{\"status\":\"error\", \"message\":\"No body\"}");
+      return;
+    }
+    String body = server.arg("plain");
+    
+    if (body.indexOf("true") != -1) {
+      Serial.println("Autotracking is ON");
+    } else {
+      Serial.println("Autotracking is OFF");
+    }
+    
+    server.send(200, "application/json", "{\"status\":\"ok\"}");
+  });
+
+  server.on("/notifications", HTTP_POST, []() {
+    if (server.hasArg("plain") == false) {
+      server.send(400, "application/json", "{\"status\":\"error\", \"message\":\"No body\"}");
+      return;
+    }
+    String body = server.arg("plain");
+    
+    if (body.indexOf("true") != -1) {
+      Serial.println("PIR Interrupts ENABLED");
+      gpio_intr_enable((gpio_num_t)PIR_PIN);
+    } else {
+      Serial.println("PIR Interrupts DISABLED");
+      gpio_intr_disable((gpio_num_t)PIR_PIN);
+    }
+    
+    server.send(200, "application/json", "{\"status\":\"ok\"}");
+  });
+
   server.begin();
   Serial.println("HTTP Server pornit pe portul 80!");
 
