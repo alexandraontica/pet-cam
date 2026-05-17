@@ -61,7 +61,7 @@ stream_subscribers: set[str] = set()
 stream_state_lock = Lock()
 esp32_ip: str | None = None
 
-def fire_and_forget_esp32_post(url, json_data=None):
+def esp32_post_request(url, json_data=None):
     """Sends a POST request to the ESP32 in a background thread to prevent blocking the backend."""
     def task():
         try:
@@ -135,7 +135,7 @@ def store_and_broadcast_frame(jpeg_bytes: bytes) -> None:
     """Store the latest JPEG frame and broadcast to all stream subscribers."""
     global latest_frame_jpeg, latest_frame_data_url, latest_frame_timestamp
 
-    frame_b64 = base64.b64encode(jpeg_bytes).decode("ascii")
+    frame_b64 = base64.b64encode(jpeg_bytes).decode("ascii") # encode to send as text
     data_url = f"data:image/jpeg;base64,{frame_b64}"
     timestamp = current_utc_timestamp()
 
@@ -182,7 +182,7 @@ def receive_camera_frame():
 
 @app.route("/api/camera/latest")
 def get_latest_frame():
-    """Return the latest JPEG frame (useful for debugging)."""
+    """Return the latest JPEG frame (for debugging)."""
     with frame_lock:
         frame = latest_frame_jpeg
 
@@ -205,7 +205,7 @@ def register():
 
     users = load_users()
     if find_user(username) is not None:
-        return jsonify({"message": "Username already taken"}), 409
+        return jsonify({"message": "Username already taken"}), 409  # conflict
 
     new_user = {
         "name": name,
@@ -265,7 +265,7 @@ def camera_move():
 
     global esp32_ip
     if esp32_ip:
-        fire_and_forget_esp32_post(f"http://{esp32_ip}/move", json_data={"direction": direction})
+        esp32_post_request(f"http://{esp32_ip}/move", json_data={"direction": direction})
         app.logger.info("Sent move command to ESP32 at %s: %s", esp32_ip, direction)
 
     app.logger.info("Camera move requested by %s: %s", user["username"], direction)
@@ -288,10 +288,9 @@ def buzzer_beep():
         message, status = auth_error
         return jsonify(message), status
 
-    # Contact ESP32 WebServer to trigger buzzer
     global esp32_ip
     if esp32_ip:
-        fire_and_forget_esp32_post(f"http://{esp32_ip}/buzzer")
+        esp32_post_request(f"http://{esp32_ip}/buzzer")
         app.logger.info("Sent buzzer command to ESP32 at %s", esp32_ip)
 
     app.logger.info("Buzzer beep requested by %s", user["username"])
@@ -307,7 +306,7 @@ def buzzer_beep():
 
 @app.route("/api/motion", methods=["GET"])
 def get_motion_signal():
-    """Return the current motion detection state."""
+    """Return the current motion detection state. (debugging purposes)"""
     user, auth_error = require_authenticated_user()
     if auth_error:
         message, status = auth_error
@@ -318,12 +317,11 @@ def get_motion_signal():
 
 @app.route("/api/motion", methods=["POST"])
 def set_motion_signal():
-    """Update the motion signal state (called by the ESP32 sensor)."""
+    """Update the motion signal state (called by the ESP32)."""
     payload = request.get_json(silent=True) or {}
     detected = bool(payload.get("detected", True))
     source = str(payload.get("source", "sensor")).strip() or "sensor"
 
-    # Placeholder endpoint for future hardware sensor integration.
     motion_signal_state["detected"] = detected
     motion_signal_state["source"] = source
     motion_signal_state["detected_at"] = None if not detected else current_utc_timestamp()
@@ -332,7 +330,7 @@ def set_motion_signal():
     global notifications_enabled
     if detected and notifications_enabled:
         # Notify via Telegram
-        send_notification("🚨 *Miscare detectata!*")
+        send_notification("*Miscare detectata!*")
         
         # Save latest frame and send it as a photo if available
         with frame_lock:
@@ -357,7 +355,7 @@ def update_notifications_setting():
 
     global esp32_ip
     if esp32_ip:
-        fire_and_forget_esp32_post(f"http://{esp32_ip}/notifications", json_data={"enabled": notifications_enabled})
+        esp32_post_request(f"http://{esp32_ip}/notifications", json_data={"enabled": notifications_enabled})
         app.logger.info("Sent notifications setting to ESP32 at %s: %s", esp32_ip, notifications_enabled)
 
     return jsonify({"message": "Settings updated", "enabled": notifications_enabled})
@@ -373,7 +371,7 @@ def update_autotracking_setting():
 
     global esp32_ip
     if esp32_ip:
-        fire_and_forget_esp32_post(f"http://{esp32_ip}/autotracking", json_data={"enabled": autotracking_enabled})
+        esp32_post_request(f"http://{esp32_ip}/autotracking", json_data={"enabled": autotracking_enabled})
         app.logger.info("Sent autotracking command to ESP32 at %s: %s", esp32_ip, autotracking_enabled)
 
     return jsonify({"message": "Settings updated", "enabled": autotracking_enabled})
@@ -459,7 +457,7 @@ def on_camera_move(payload):
 
     global esp32_ip
     if esp32_ip:
-        fire_and_forget_esp32_post(f"http://{esp32_ip}/move", json_data={"direction": direction})
+        esp32_post_request(f"http://{esp32_ip}/move", json_data={"direction": direction})
         app.logger.info("Sent move command to ESP32 at %s via socket: %s", esp32_ip, direction)
 
     app.logger.info("Camera move requested by %s via socket: %s", user["username"], direction)
@@ -481,10 +479,9 @@ def on_trigger_buzzer(_payload=None):
     if auth_error:
         return {"ok": False, "message": "Authentication required"}
 
-    # Contact ESP32 WebServer to trigger buzzer
     global esp32_ip
     if esp32_ip:
-        fire_and_forget_esp32_post(f"http://{esp32_ip}/buzzer")
+        esp32_post_request(f"http://{esp32_ip}/buzzer")
         app.logger.info("Sent buzzer command to ESP32 at %s via socket", esp32_ip)
 
     app.logger.info("Buzzer trigger requested by %s via socket", user["username"])

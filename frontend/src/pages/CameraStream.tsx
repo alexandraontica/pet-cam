@@ -61,6 +61,7 @@ export function CameraStream() {
     motionDetectionRef.current = motionDetection;
   }, [motionDetection]);
 
+  // Fetches and sets the currently authenticated user on component mount
   useEffect(() => {
     let isMounted = true;
 
@@ -80,10 +81,12 @@ export function CameraStream() {
         }
 
         if (isMounted) {
+          // Store user session state both in React state and localStorage
           setCurrentUser(data.user);
           localStorage.setItem("petcam_current_user", JSON.stringify(data.user));
         }
       } catch {
+        // Clear session and redirect to login if authentication fails
         localStorage.removeItem("petcam_current_user");
         toast.error("Please login first!");
         navigate("/");
@@ -93,15 +96,16 @@ export function CameraStream() {
     loadCurrentUser();
 
     return () => {
-      isMounted = false;
+      isMounted = false; // Cleanup flag to prevent setting state on unmounted component
     };
   }, [navigate]);
 
+  // Initializes and manages the Socket.IO connection for real-time events
   useEffect(() => {
     const socket = io({
       withCredentials: true,
       path: "/socket.io",
-      transports: ["polling"],
+      transports: ["polling"], // Use polling to avoid issues with some restrictive networks
       upgrade: false,
     });
     socketRef.current = socket;
@@ -115,20 +119,24 @@ export function CameraStream() {
       streamSubscribedRef.current = false;
     };
 
+    // Handles incoming motion detection signals from the backend
     const onMotionSignal = (data: MotionSignal) => {
+      // Ignore if motion detection is toggled off or data is invalid
       if (!motionDetectionRef.current || !data.detected || !data.detected_at) {
         return;
       }
 
       setLastMotionSignalAt((prev) => {
+        // Avoid duplicate activity logs for the same timestamp
         if (prev === data.detected_at) {
           return prev;
         }
 
         setActivity((current) => {
+          // Append new activity log and keep only the latest 5 entries
           const newActivity = [
             ...current,
-            `${new Date().toLocaleTimeString()} - 🐾 Movement detected`,
+            `${new Date().toLocaleTimeString()} - Movement detected`,
           ];
           return newActivity.slice(-5);
         });
@@ -136,6 +144,7 @@ export function CameraStream() {
       });
     };
 
+    // Receives and updates the latest frame from the live camera stream
     const onCameraFrame = (data: CameraFramePayload) => {
       if (!data.image) {
         return;
@@ -152,7 +161,7 @@ export function CameraStream() {
     const onAutotrackingState = (data: { enabled: boolean }) => {
       setAutoTracking(data.enabled);
       if (!data.enabled) {
-        toast.success("Autotracking scan completed! 🎯");
+        toast.success("Autotracking scan completed!");
       }
     };
 
@@ -180,16 +189,18 @@ export function CameraStream() {
     };
   }, []);
 
+  // Manages subscribing and unsubscribing to the camera stream based on component state
   useEffect(() => {
     const socket = socketRef.current;
     if (!socket || !socket.connected) {
       return;
     }
 
+    // Subscribe to stream if user has resumed it and we are not currently subscribed
     if (isStreaming && !streamSubscribedRef.current) {
       socket.emit(
         "subscribe_camera_stream",
-        { interval_ms: 66 },
+        { interval_ms: 66 }, // Requesting roughly ~15 FPS
         (response?: { ok?: boolean; message?: string }) => {
           if (!response?.ok) {
             toast.error(response?.message || "Could not subscribe to camera stream.");
@@ -202,6 +213,7 @@ export function CameraStream() {
       return;
     }
 
+    // Unsubscribe from stream if user paused it and we are currently subscribed
     if (!isStreaming && streamSubscribedRef.current) {
       socket.emit("unsubscribe_camera_stream", (response?: { ok?: boolean; message?: string }) => {
         if (!response?.ok) {
@@ -214,6 +226,7 @@ export function CameraStream() {
     }
   }, [isSocketConnected, isStreaming]);
 
+  // Utility function to emit socket events with a timeout and promise the acknowledgment
   const emitSocketEvent = <TResponse,>(event: string, payload?: unknown): Promise<TResponse> => {
     const socket = socketRef.current;
     if (!socket || !socket.connected) {
@@ -221,6 +234,7 @@ export function CameraStream() {
     }
 
     return new Promise<TResponse>((resolve, reject) => {
+      // Set a 2000ms timeout for the socket response
       socket.timeout(2000).emit(event, payload, (error: unknown, response: TResponse) => {
         if (error) {
           reject(error);
@@ -252,7 +266,7 @@ export function CameraStream() {
       // Best effort logout on backend.
     } finally {
       localStorage.removeItem("petcam_current_user");
-      toast.success("Logged out successfully! 👋");
+      toast.success("Logged out successfully!");
       navigate("/");
     }
   };
@@ -274,10 +288,12 @@ export function CameraStream() {
     }
   };
 
+  // Handles manual camera movement and falls back to HTTP if Socket.IO is unavailable
   const handleCameraMove = async (direction: "up" | "down" | "left" | "right") => {
+    // Automatically disable auto-tracking when the user manually moves the camera
     if (autoTracking) {
       setAutoTracking(false);
-      toast.info("Auto-tracking disabled by manual override 🛑");
+      toast.info("Auto-tracking disabled by manual override");
       try {
         await fetch("/api/settings/autotracking", {
           method: "POST",
@@ -290,6 +306,7 @@ export function CameraStream() {
     }
 
     try {
+      // Prefer Socket.IO for lower latency camera control if connected
       if (isSocketConnected) {
         const socketResponse = await emitSocketEvent<{ ok?: boolean; message?: string }>("camera_move", {
           direction,
@@ -303,6 +320,7 @@ export function CameraStream() {
         return;
       }
 
+      // Fallback to REST API if socket connection is down
       const response = await fetch("/api/camera/move", {
         method: "POST",
         headers: {
@@ -324,13 +342,15 @@ export function CameraStream() {
     }
   };
 
+  // Triggers the buzzer via the backend
   const handleBuzzerTrigger = async () => {
     if (isTriggeringBuzzer) {
-      return;
+      return; // Prevent spamming the buzzer trigger
     }
 
     setIsTriggeringBuzzer(true);
     try {
+      // Prefer real-time socket communication if available
       if (isSocketConnected) {
         const socketResponse = await emitSocketEvent<{ ok?: boolean; message?: string }>("trigger_buzzer");
         if (!socketResponse?.ok) {
@@ -338,10 +358,11 @@ export function CameraStream() {
           return;
         }
 
-        toast.success("Buzzer signal 🔊");
+        toast.success("Buzzer signal");
         return;
       }
 
+      // Fallback to standard HTTP request
       const response = await fetch("/api/buzzer", {
         method: "POST",
         credentials: "include",
@@ -353,7 +374,7 @@ export function CameraStream() {
         return;
       }
 
-      toast.success("Buzzer signal 🔊");
+      toast.success("Buzzer signal");
     } catch {
       toast.error("Could not reach backend buzzer endpoint.");
     } finally {
@@ -376,7 +397,7 @@ export function CameraStream() {
               <h1 className="font-bold bg-gradient-to-r from-pink-500 to-purple-500 bg-clip-text text-transparent">
                 PetCam
               </h1>
-              <p className="text-sm text-gray-600">Welcome, {currentUser?.name}! 👋</p>
+              <p className="text-sm text-gray-600">Welcome, {currentUser?.name}!</p>
             </div>
           </div>
           <Button
@@ -579,7 +600,7 @@ export function CameraStream() {
                     onCheckedChange={async (checked) => {
                       setMotionDetection(checked);
                       toast.info(
-                        checked ? "Motion alerts enabled 🔔" : "Motion alerts disabled 🔕"
+                        checked ? "Motion alerts enabled" : "Motion alerts disabled"
                       );
                       try {
                         await fetch("/api/settings/notifications", {
@@ -604,7 +625,7 @@ export function CameraStream() {
                     onCheckedChange={async (checked) => {
                       setAutoTracking(checked);
                       toast.info(
-                        checked ? "Auto-tracking enabled 🎯" : "Auto-tracking disabled 🛑"
+                        checked ? "Auto-tracking enabled" : "Auto-tracking disabled"
                       );
                       try {
                         await fetch("/api/settings/autotracking", {

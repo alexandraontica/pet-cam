@@ -5,34 +5,33 @@
 #include <Wire.h>
 #include <Adafruit_VL53L0X.h>
 #include "esp_camera.h"
-#include "img_converters.h"  // fmt2jpg() - conversie RGB565 -> JPEG
+#include "img_converters.h"  // fmt2jpg(), converts RGB565 to JPEG
 #include "soc/soc.h"
 #include "soc/gpio_reg.h"
 #include "soc/io_mux_reg.h"
 #include <WebServer.h>
 
-// ======================= CONFIGURARE =======================
 // WiFi
 #define WIFI_SSID     "Alexandra"
 #define WIFI_PASSWORD "Alex2702"
 
-// Backend server URL (IP-ul laptopului pe reteaua WiFi)
-#define BACKEND_HOST "10.213.151.82"
+// Backend server
+#define BACKEND_HOST "10.213.151.82"  // laptop IP on the WiFi network
 #define BACKEND_PORT 5000
 #define FRAME_ENDPOINT "/api/camera/frame"
 #define MOTION_ENDPOINT "/api/motion"
 #define AUTOTRACKING_STATUS_ENDPOINT "/api/settings/autotracking/sync"
 
-// Interval intre cadre (ms)
+// Interval between frames (ms)
 #define CAPTURE_INTERVAL_MS 200
 
-// Calitate JPEG la conversie (0-100, mai mare = mai buna calitate, mai mult traffic)
+// JPEG quality for conversion (0-100, higher = better quality, more traffic)
 #define JPEG_QUALITY 80
 
-// Timeout HTTP (ms)
+// HTTP timeout (ms)
 #define HTTP_TIMEOUT_MS 5000
 
-// ===================== PINII AI THINKER ====================
+// ===================== CAMERA PINS ====================
 #define PWDN_GPIO_NUM     32
 #define RESET_GPIO_NUM    -1
 #define XCLK_GPIO_NUM      0
@@ -58,7 +57,7 @@ unsigned long lastFrameTime = 0;
 unsigned long frameCount = 0;
 unsigned long fpsTimer = 0;
 
-// ======================== SENZORI & BUZZER ==========================
+// ======================== SENSORS & BUZZER ==========================
 #define PIR_PIN 13
 #define BUZZER_PIN 4
 
@@ -67,10 +66,6 @@ volatile bool motionDetected = false;
 int buzzerState = 0;
 unsigned long buzzerStartTime = 0;
 
-// ======================== WEB SERVER =======================
-WebServer server(80);
-
-// ======================== AUTOTRACKING & SENZOR DISTANTA ========================
 Adafruit_VL53L0X lox = Adafruit_VL53L0X();
 bool loxInitialized = false;
 
@@ -86,86 +81,87 @@ int bestTilt = 10;
 unsigned long lastScanMoveTime = 0;
 unsigned long lastScanCompleteTime = 0;
 
+// ======================== WEB SERVER =======================
+WebServer server(80);
+
 // ======================== I2C & PCA9685 ========================
-#define I2C_SDA 15             // Pinul de Date I2C (Serial Data) al ESP32
-#define I2C_SCL 14             // Pinul de Ceas I2C (Serial Clock) al ESP32
-#define PCA9685_ADDR 0x40      // Adresa I2C hardware implicita a modulului PCA9685
+#define I2C_SDA 15             // I2C Data pin (SDA)
+#define I2C_SCL 14             // I2C Clock pin (SCL)
+#define PCA9685_ADDR 0x40      // Hardware I2C address of the PCA9685 module
 
-#define PCA9685_MODE1     0x00 // Adresa registrului principal de configurare (Mode 1)
-#define PCA9685_PRESCALE  0xFE // Adresa registrului pentru prescaler PWM
-#define LED0_ON_L         0x06 // Adresa de start pentru canalul 0. Fiecare canal ocupa cate 4 registri succesivi.
+#define PCA9685_MODE1     0x00 // Main configuration register address (Mode 1)
+#define PCA9685_PRESCALE  0xFE // Register address for PWM prescaler
+#define LED0_ON_L         0x06 // Start address for channel 0. Each channel occupies 4 consecutive registers.
 
-#define SERVO_MIN   102        // Numarul de pasi "ticks" pentru 0 grade (aprox 500us latime puls) din cei 4096 pasi ai ciclului
-#define SERVO_MAX   491        // Numarul de "ticks" pentru 180 grade (aprox 2400us latime puls)
+#define SERVO_MIN   102        // Number of "ticks" for 0 degrees (approx 500us pulse width) out of 4096 ticks per cycle
+#define SERVO_MAX   491        // Number of "ticks" for 180 degrees (approx 2400us pulse width)
 
 int currentPan = 110;
 int currentTilt = 10; 
 
-
 void pca9685WriteReg(uint8_t reg, uint8_t value) {
-  Wire.beginTransmission(PCA9685_ADDR); // Initiaza comunicarea I2C tintind adresa hardware a cipului (0x40)
-  Wire.write(reg);                      // Trimite pe bus adresa registrului intern pe care vrem sa il modificam
-  Wire.write(value);                    // Trimite valoarea (octetul) ce va fi scrisa efectiv in acel registru
-  Wire.endTransmission();               // Emite semnalul de STOP pe I2C si elibereaza magistrala de date
+  Wire.beginTransmission(PCA9685_ADDR); // Start I2C communication targeting the chip's hardware address (0x40)
+  Wire.write(reg);                      // Send the internal register address to modify
+  Wire.write(value);                    // Send the value (byte) to be written to that register
+  Wire.endTransmission();               // Emit STOP signal on I2C and release the data bus
 }
 
 uint8_t pca9685ReadReg(uint8_t reg) {
-  Wire.beginTransmission(PCA9685_ADDR); // Initiaza comunicarea I2C pentru a seta pointerul de registru
-  Wire.write(reg);                      // Scrie adresa registrului pe care vrem sa il citim
-  Wire.endTransmission();               // Incheie transmisia preliminara de setare a adresei
-  Wire.requestFrom(PCA9685_ADDR, (uint8_t)1); // Preia controlul liniei de date si cere cipului 1 byte inapoi
-  return Wire.read();                   // Citeste acel byte primit prin I2C si il returneaza
+  Wire.beginTransmission(PCA9685_ADDR); // Start I2C communication to set the register pointer
+  Wire.write(reg);                      // Write the register address to read
+  Wire.endTransmission();               // End the transmission for address setting
+  Wire.requestFrom(PCA9685_ADDR, (uint8_t)1); // Take control of the data line and request 1 byte from the chip
+  return Wire.read();                   // Read the received byte via I2C and return it
 }
 
 bool pca9685Init() {
-  pca9685WriteReg(PCA9685_MODE1, 0x00); // Scrie 0x00 in MODE1 pentru a opri functiile speciale si a asigura starea activa (trezit)
-  delay(5);                             // Asteapta 5ms pentru ca oscilatorul intern al PCA9685 sa se stabilizeze la pornire
-  uint8_t mode1 = pca9685ReadReg(PCA9685_MODE1); // Citeste inapoi registrul MODE1 pentru a testa prezenta cipului
-  if (mode1 == 0xFF) return false;      // 0xFF (255) semnifica ca firele SDA/SCL sunt libere (trase HIGH), cipul nu raspunde
+  pca9685WriteReg(PCA9685_MODE1, 0x00); // Write 0x00 to MODE1 to disable special functions and ensure active state (wake up)
+  delay(5);                             // Wait 5ms for the PCA9685's internal oscillator to stabilize at startup
+  uint8_t mode1 = pca9685ReadReg(PCA9685_MODE1); // Read back MODE1 to test chip presence
+  if (mode1 == 0xFF) return false;      // 0xFF (255) means SDA/SCL wires are floating (pulled HIGH), chip not responding
 
-  uint8_t prescale = 121;               // Valoarea calculata pentru a forta oscilatorul la frecventa de 50Hz (25MHz / (4096 * 50) - 1)
-  uint8_t oldMode = pca9685ReadReg(PCA9685_MODE1); // Salveaza configuratia existenta a registrului MODE1
-  pca9685WriteReg(PCA9685_MODE1, (oldMode & 0x7F) | 0x10); // Forteaza cipul in mod SLEEP (bit 4 HIGH), o conditie fizica impusa pt. schimbarea frecventei
-  pca9685WriteReg(PCA9685_PRESCALE, prescale);             // Scrie divizorul de 121 in registrul hardware PRESCALE
-  pca9685WriteReg(PCA9685_MODE1, oldMode);                 // Iese din modul SLEEP prin rescrierea bitului 4 inapoi in 0
-  delay(5);                             // Asteapta din nou 5ms pentru restartarea corecta a oscilatorului intern la 50Hz
-  pca9685WriteReg(PCA9685_MODE1, oldMode | 0xA0);          // Seteaza Auto-Increment (bit 5) pt viteza si declanseaza Restart (bit 7)
-  return true;                          // Initializarea s-a terminat cu succes
+  uint8_t prescale = 121;               // Value calculated to force oscillator to 50Hz (25MHz / (4096 * 50) - 1)
+  uint8_t oldMode = pca9685ReadReg(PCA9685_MODE1); // Save existing MODE1 config
+  pca9685WriteReg(PCA9685_MODE1, (oldMode & 0x7F) | 0x10); // Force chip into SLEEP mode (bit 4 HIGH), required for frequency change
+  pca9685WriteReg(PCA9685_PRESCALE, prescale);             // Write 121 to PRESCALE register
+  pca9685WriteReg(PCA9685_MODE1, oldMode);                 // Exit SLEEP by writing bit 4 back to 0
+  delay(5);                             // Wait another 5ms for oscillator restart at 50Hz
+  pca9685WriteReg(PCA9685_MODE1, oldMode | 0xA0);          // Set Auto-Increment (bit 5) for speed and trigger Restart (bit 7)
+  return true;                          // Initialization successful
 }
 
 void servoWrite(uint8_t canal, uint16_t ticks) {
-  uint8_t reg = LED0_ON_L + (canal * 4); // Calculeaza adresa registrului ON_L pt canalul cerut (se inmulteste cu 4 pt ca fiecare canal are 4 registri de cate 8 biti)
-  Wire.beginTransmission(PCA9685_ADDR);  // Deschide sesiunea de scriere I2C
-  Wire.write(reg);                       // Trimite adresa de pornire. Pt ca am activat Auto-Increment, urmatorii 4 bytes curg direct in pachetele adiacente.
-  Wire.write(0);                         // Scrie ON_L (low byte de START): Semnalul porneste la momentul 0 din ciclul de 20ms
-  Wire.write(0);                         // Scrie ON_H (high byte de START): Ramane 0.
-  Wire.write(ticks & 0xFF);              // Scrie OFF_L (low byte de STOP): Taie semnalul PWM la valoarea extrasa prin aplicarea mastii pentru primii 8 biti
-  Wire.write(ticks >> 8);                // Scrie OFF_H (high byte de STOP): Shiftare pt a extrage bitii ramasi ai valorii 'ticks' care guverneaza stingerea semnalului
-  Wire.endTransmission();                // Inchide comunicarea, modificand curentul efectiv scos pe pinii hardware PCA9685
+  uint8_t reg = LED0_ON_L + (canal * 4); // Calculate ON_L register address for requested channel (multiply by 4, each channel has 4 registers)
+  Wire.beginTransmission(PCA9685_ADDR);  // Open I2C write session
+  Wire.write(reg);                       // Send start address. With Auto-Increment, next 4 bytes flow directly into adjacent registers.
+  Wire.write(0);                         // Write ON_L (low byte of START): Signal starts at 0 in the 20ms cycle
+  Wire.write(0);                         // Write ON_H (high byte of START): Remains 0.
+  Wire.write(ticks & 0xFF);              // Write OFF_L (low byte of STOP): PWM signal cut at value masked for first 8 bits
+  Wire.write(ticks >> 8);                // Write OFF_H (high byte of STOP): Shift to extract remaining bits of 'ticks'
+  Wire.endTransmission();                // Close communication, changing the actual output on PCA9685 hardware pins
 }
 
-uint16_t gradeLaTicks(int grade) {
-  // Executa maparea liniara a valorilor: din plaja de intrari 0-180 grade in plaja hardware de iesiri 102-491 ticks
+uint16_t degreesToTicks(int grade) {
+  // Linear mapping: input range 0-180 degrees to hardware output range 102-491 ticks
   return SERVO_MIN + (uint16_t)((float)grade / 180.0 * (SERVO_MAX - SERVO_MIN));
 }
 
-// ======================== INTRERUPERI ==========================
-// Functia executata la intrerupere, tinuta in RAM (IRAM_ATTR) pentru viteza
+// ======================== INTERRUPTS ==========================
+// Function executed on interrupt, kept in RAM (IRAM_ATTR) for speed
 void IRAM_ATTR pirInterrupt(void* arg) {
-  // Citim starea tuturor intreruperilor GPIO folosind structura globala
+  // Read the state of all GPIO interrupts using the global structure
   if (GPIO.status & (1 << PIR_PIN)) {
     motionDetected = true;
     
-    // Scriem 1 in registrul de clear la pozitia bitului 13 pentru a reseta flag-ul intreruperii
+    // Write 1 to the clear register at bit 13 to reset the interrupt flag
     GPIO.status_w1tc = (1 << PIR_PIN);
   }
 }
 
-// ======================= FUNCTII ===========================
+// ======================= FUNCTIONS ===========================
 
 /**
- * Initializeaza camera OV2640 in modul RGB565.
- * Frame-urile brute vor fi convertite in JPEG cu fmt2jpg() inainte de trimitere.
+ * Initializes the OV2640 camera in RGB565 mode.
  */
 bool initCamera() {
   camera_config_t config;
@@ -188,37 +184,37 @@ bool initCamera() {
   config.pin_pwdn     = PWDN_GPIO_NUM;
   config.pin_reset    = RESET_GPIO_NUM;
 
-  config.xclk_freq_hz = 10000000;          // 10MHz — viteza scazuta pentru stabilitate
-  config.pixel_format = PIXFORMAT_RGB565;   // Format brut — convertim in JPEG manual
-  config.frame_size   = FRAMESIZE_QVGA;    // 320x240 — bun pentru streaming cu conversie soft
-  config.jpeg_quality = 12;                // Necesar in config chiar daca nu e JPEG nativ
-  config.fb_count     = 1;                 // Single buffer (RGB565 e mare, economisim RAM)
+  config.xclk_freq_hz = 10000000;          // 10MHz
+  config.pixel_format = PIXFORMAT_RGB565;  
+  config.frame_size   = FRAMESIZE_QVGA;    // 320x240
+  config.jpeg_quality = 12;
+  config.fb_count     = 1;                 // Single buffer (save RAM)
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
-    Serial.printf("Eroare la initializarea camerei: 0x%x\n", err);
+    Serial.printf("Error initialising camera: 0x%x\n", err);
     return false;
   }
 
-  // Ajustari senzor pentru streaming
+  // Adjust sensor for streaming
   sensor_t *s = esp_camera_sensor_get();
   if (s != NULL) {
-    s->set_brightness(s, 1);    // Luminozitate usor crescuta
-    s->set_saturation(s, 0);    // Saturatie normala
+    s->set_brightness(s, 1);    // Slightly increased brightness
+    s->set_saturation(s, 0);    // Normal saturation
   }
 
-  Serial.println("Camera initializata cu succes!");
+  Serial.println("Camera initialized successfully!");
   return true;
 }
 
 /**
- * Conectare la WiFi cu retry.
+ * Connect to WiFi with retry.
  */
 void connectWiFi() {
   if (WiFi.status() == WL_CONNECTED) return;
 
-  Serial.printf("Conectare la WiFi '%s'", WIFI_SSID);
-  WiFi.mode(WIFI_STA);
+  Serial.printf("Connecting to WiFi '%s'", WIFI_SSID);
+  WiFi.mode(WIFI_STA);  // station mode (acts like a phone, not a router = access point)
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
 
   int attempts = 0;
@@ -229,17 +225,17 @@ void connectWiFi() {
   }
 
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nWiFi conectat!");
+    Serial.println("\nWiFi connected!");
     Serial.printf("IP: %s\n", WiFi.localIP().toString().c_str());
     Serial.printf("RSSI: %d dBm\n", WiFi.RSSI());
   } else {
-    Serial.println("\nWiFi ESUAT! Se va reincerca...");
+    Serial.println("\nWiFi FAILED! Will retry...");
   }
 }
 
 /**
- * Trimite o notificare catre backend cand senzorul PIR detecteaza miscare.
- * Returneaza true daca backend-ul a confirmat primirea.
+ * Sends a notification to the backend when the PIR sensor detects motion.
+ * Returns true if the backend confirmed receipt.
  */
 bool notifyMotion() {
   HTTPClient http;
@@ -251,12 +247,12 @@ bool notifyMotion() {
   bool success = false;
 
   if (httpCode == 200) {
-    Serial.println("Backend notificat cu succes.");
+    Serial.println("Backend notified successfully.");
     success = true;
   } else if (httpCode > 0) {
-    Serial.printf("Backend a raspuns cu eroare: %d\n", httpCode);
+    Serial.printf("Backend responded with error: %d\n", httpCode);
   } else {
-    Serial.printf("Eroare la conectare: %s\n", http.errorToString(httpCode).c_str());
+    Serial.printf("Connection error: %s\n", http.errorToString(httpCode).c_str());
   }
   
   http.end();
@@ -264,40 +260,40 @@ bool notifyMotion() {
 }
 
 /**
- * Captura un frame RGB565, il converteste in JPEG cu fmt2jpg(),
- * si il trimite prin HTTP POST la backend.
- * Returneaza true daca frame-ul a fost trimis cu succes.
+ * Captures an RGB565 frame, converts it to JPEG with fmt2jpg(),
+ * and sends it via HTTP POST to the backend.
+ * Returns true if the frame was sent successfully.
  */
 bool captureAndSendFrame() {
-  // Captura frame (RGB565 brut)
+  // Capture frame (raw RGB565)
   camera_fb_t *fb = esp_camera_fb_get();
   if (!fb) {
-    Serial.println("Eroare: nu am putut captura frame!");
+    Serial.println("Error: could not capture frame!");
     return false;
   }
 
-  // Converteste RGB565 -> JPEG
+  // Convert RGB565 to JPEG
   uint8_t *jpeg_buf = NULL;
   size_t jpeg_len = 0;
 
   bool converted = fmt2jpg(
-    fb->buf, fb->len,
-    fb->width, fb->height,
-    PIXFORMAT_RGB565,
-    JPEG_QUALITY,
-    &jpeg_buf, &jpeg_len
+    fb->buf, fb->len,  // the pixels and the length in bytes
+    fb->width, fb->height,  // the dimensions of the image
+    PIXFORMAT_RGB565,  // the format of the pixels
+    JPEG_QUALITY,  // the quality of the JPEG
+    &jpeg_buf, &jpeg_len  // the JPEG buffer and the length in bytes
   );
 
-  // Eliberam buffer-ul camerei imediat ce avem JPEG-ul
+  // Release the camera buffer as soon as we have the JPEG
   esp_camera_fb_return(fb);
 
   if (!converted || jpeg_buf == NULL) {
-    Serial.println("Eroare la compresia JPEG!");
+    Serial.println("JPEG compression error!");
     if (jpeg_buf) free(jpeg_buf);
     return false;
   }
 
-  // Trimite JPEG prin HTTP POST
+  // Send JPEG via HTTP POST
   HTTPClient http;
   http.begin(backendUrl);
   http.addHeader("Content-Type", "image/jpeg");
@@ -305,18 +301,18 @@ bool captureAndSendFrame() {
 
   int httpCode = http.POST(jpeg_buf, jpeg_len);
 
-  // Eliberam memoria JPEG alocata de fmt2jpg
+  // Free the JPEG memory allocated by fmt2jpg
   free(jpeg_buf);
 
-  // Verifica raspuns
+  // Check response
   if (httpCode == 200) {
     return true;
   } else {
     if (httpCode > 0) {
-      Serial.printf("HTTP POST esuat: cod %d\n", httpCode);
+      Serial.printf("HTTP POST failed: code %d\n", httpCode);
     } else {
-      Serial.printf("HTTP POST eroare conexiune: %s\n",
-                     http.errorToString(httpCode).c_str());
+      Serial.printf("HTTP POST connection error: %s\n",
+             http.errorToString(httpCode).c_str());
     }
     http.end();
     return false;
@@ -330,87 +326,85 @@ void setup() {
   delay(1000);
   Serial.println("\n\n=== PET-CAM ESP32 ===");
 
-  // --- Configurare senzor PIR ---
+  // --- PIR sensor configuration ---
   
-  // Setam functia de baza GPIO, activam functionalitatea de input si pull-down in multiplexorul pinului 13
-  // Pentru IO_MUX nu exista o structura similara, asa ca procedam pur cu pointeri dereferentiati:
+  // Set base GPIO function (not used for SD card), enable input and pull-down in 
+  // the multiplexer for pin 13
+  // For IO_MUX there is no GPIO structure, so I use direct pointer dereferencing:
   *((volatile uint32_t *)IO_MUX_GPIO13_REG) = (2 << MCU_SEL_S) | FUN_IE | FUN_PD;
   
-  // Oprim driver-ul de output pentru pinul 13 scriind 1 la pozitia aferenta
+  // Disable output for pin 13 by writing 1 at the corresponding position
   GPIO.enable_w1tc = (1 << PIR_PIN);
   
-  // Citim starea curenta a configuratiei pinului 13 intr-o variabila temporara
+  // Read current pin 13 configuration into a temporary variable
   uint32_t pin_config = GPIO.pin[PIR_PIN].val;
   
-  // Stergem bitii care controleaza tipul de intrerupere aplicand o masca logica AND NOT
+  // Clear bits controlling interrupt type
   pin_config &= ~GPIO_PIN_INT_TYPE_M;
   
-  // Inseram valoarea pentru declansare pe front crescator shiftata pe pozitia corecta din registru
+  // Insert value for rising edge trigger shifted to the correct register position
   pin_config |= (GPIO_INTR_POSEDGE << GPIO_PIN_INT_TYPE_S);
   
-  // Scriem configuratia modificata inapoi in registrul pinului 13
+  // Write modified configuration back to pin 13 register
   GPIO.pin[PIR_PIN].val = pin_config;
   
-  // Initializam serviciul global de gestionare a intreruperilor pe GPIO
+  // Initialize global GPIO interrupt service
   gpio_install_isr_service(0);
   
-  // Atasam functia handler creata anterior la evenimentele pinului 13
+  // Attach previously created handler function to pin 13 events
   gpio_isr_handler_add((gpio_num_t)PIR_PIN, pirInterrupt, NULL);
 
-  // --- Configurare Buzzer (VCC control prin GPIO4) ---
-  // Setam IO MUX pentru pinul 4: functia GPIO (MCU_SEL = 0), activam pull-down (FUN_PD),
-  // si setam drive capability la valoarea 3 (pozitionat pe bitul 10).
+  // --- Buzzer configuration ---
+  // Set IO MUX for pin 4: GPIO function (MCU_SEL = 0), enable pull-down (FUN_PD),
+  // and set drive capability to value 3 (bit 10).
   *((volatile uint32_t *)IO_MUX_GPIO4_REG) = (0 << MCU_SEL_S) | (3 << 10) | FUN_PD;
 
-  // Activam driver-ul de output pentru pinul 4
+  // Enable output for pin 4
   GPIO.enable_w1ts = (1 << BUZZER_PIN);
 
-  // Buzzer OPRIT (stare LOW) - Scriem 1 in registrul W1TC
+  // Buzzer OFF (LOW state)
   GPIO.out_w1tc = (1 << BUZZER_PIN);
 
-  // Construim URL-ul backend
+  // Build backend URLs
   backendUrl = String("http://") + BACKEND_HOST + ":" +
                String(BACKEND_PORT) + FRAME_ENDPOINT;
   motionUrl = String("http://") + BACKEND_HOST + ":" +
               String(BACKEND_PORT) + MOTION_ENDPOINT;
   autotrackingStatusUrl = String("http://") + BACKEND_HOST + ":" +
                           String(BACKEND_PORT) + AUTOTRACKING_STATUS_ENDPOINT;
-  Serial.printf("Backend URL: %s\n", backendUrl.c_str());
-  Serial.printf("Motion URL: %s\n", motionUrl.c_str());
 
-  // Initializeaza camera
+  // Initialize camera
   if (!initCamera()) {
-    Serial.println("Camera nu a pornit! Restart in 5s...");
+    Serial.println("Camera is still off! Restart in 5s...");
     delay(5000);
     ESP.restart();
   }
 
-  // Initializare PCA9685
+  // Initialize PCA9685
   Wire.begin(I2C_SDA, I2C_SCL);
   if (pca9685Init()) {
     Serial.println("PCA9685 initializat cu succes.");
-    // Seteaza pozitiile initiale
-    servoWrite(0, gradeLaTicks(currentPan));
-    servoWrite(1, gradeLaTicks(currentTilt));
+    // Set initial positions of servos
+    servoWrite(0, degreesToTicks(currentPan));
+    servoWrite(1, degreesToTicks(currentTilt));
   } else {
-    Serial.println("Eroare la initializare PCA9685!");
+    Serial.println("Error initializing PCA9685!");
   }
 
   if (!lox.begin(0x29, false, &Wire)) {
-    Serial.println(F("Eroare la initializare VL53L0X!"));
+    Serial.println(F("Error initializing VL53L0X!"));
     loxInitialized = false;
   } else {
-    Serial.println(F("VL53L0X initializat cu succes."));
+    Serial.println(F("VL53L0X initialized successfully."));
     loxInitialized = true;
   }
 
-  // Conectare WiFi
   connectWiFi();
 
-  // Configurare Server HTTP pe ESP32
+  // Configure HTTP Server on ESP32
   server.on("/buzzer", HTTP_POST, []() {
     server.send(200, "application/json", "{\"status\":\"ok\"}");
-    Serial.println("Comanda buzzer primita de la backend!");
+    Serial.println("Buzzer command received from backend!");
     
     if (buzzerState == 0) {
       buzzerState = 1;
@@ -425,7 +419,7 @@ void setup() {
       return;
     }
     String body = server.arg("plain");
-    Serial.println("Comanda move primita: " + body);
+    Serial.println("Move command received: " + body);
     
     int step = 10;
     if (body.indexOf("up") != -1) {
@@ -439,26 +433,26 @@ void setup() {
     }
     Serial.printf("currentPan: %d, currentTilt: %d\n", currentPan, currentTilt);
 
-    // Asigura-te ca ramanem in limitele fizice (0-180 grade)
+    // Make sure we stay within physical limits (0-180 degrees)
     if (currentPan < 0) currentPan = 0;
     if (currentPan > 180) currentPan = 180;
     if (currentTilt < 0) currentTilt = 0;
     if (currentTilt > 180) currentTilt = 180;
 
-    servoWrite(0, gradeLaTicks(currentPan));
-    servoWrite(1, gradeLaTicks(currentTilt));
+    servoWrite(0, degreesToTicks(currentPan));
+    servoWrite(1, degreesToTicks(currentTilt));
     
     server.send(200, "application/json", "{\"status\":\"ok\"}");
   });
 
   server.on("/autotracking", HTTP_POST, []() {
-    if (server.hasArg("plain") == false) {
+    if (server.hasArg("plain") == false) {  // check if there is a body
       server.send(400, "application/json", "{\"status\":\"error\", \"message\":\"No body\"}");
       return;
     }
-    String body = server.arg("plain");
+    String body = server.arg("plain");  // get body
     
-    if (body.indexOf("true") != -1) {
+    if (body.indexOf("true") != -1) {  // if body contains "true"
       Serial.println("Autotracking is ON");
       autotrackingEnabled = true;
       isScanning = true;
@@ -470,8 +464,8 @@ void setup() {
       bestTilt = 10;
       currentPan = scanPan;
       currentTilt = scanTilt;
-      servoWrite(0, gradeLaTicks(currentPan));
-      servoWrite(1, gradeLaTicks(currentTilt));
+      servoWrite(0, degreesToTicks(currentPan));
+      servoWrite(1, degreesToTicks(currentTilt));
       lastScanMoveTime = millis();
     } else {
       Serial.println("Autotracking is OFF");
@@ -494,25 +488,25 @@ void setup() {
       gpio_intr_enable((gpio_num_t)PIR_PIN);
     } else {
       Serial.println("PIR Interrupts DISABLED");
-      gpio_intr_disable((gpio_num_t)PIR_PIN);
+      gpio_intr_disable((gpio_num_t)PIR_PIN);  // disable interrupts
     }
     
     server.send(200, "application/json", "{\"status\":\"ok\"}");
   });
 
   server.begin();
-  Serial.println("HTTP Server pornit pe portul 80!");
+  Serial.println("HTTP Server started on port 80!");
 
   fpsTimer = millis();
-  Serial.println("Setup complet - incep streaming-ul!\n");
+  Serial.println("Setup completed, start streaming!\n");
 }
 
 // ========================= LOOP ============================
 void loop() {
-  // Procesare cereri HTTP catre ESP32 (ex: /buzzer)
+  // Process HTTP requests to ESP32 
   server.handleClient();
 
-  // --- Procesare Buzzer (Non-Blocking) ---
+  // --- Buzzer processing (Non-Blocking) ---
   if (buzzerState > 0) {
     unsigned long currentMillis = millis();
     if (buzzerState == 1 && currentMillis - buzzerStartTime >= 30) {
@@ -525,16 +519,16 @@ void loop() {
       buzzerStartTime = currentMillis;
     } else if (buzzerState == 3 && currentMillis - buzzerStartTime >= 30) {
       GPIO.out_w1tc = (1 << BUZZER_PIN); // Set LOW
-      buzzerState = 0; // Finalizat
+      buzzerState = 0; // Done
     }
   }
 
-  // --- Procesare Autotracking ---
+  // --- Autotracking processing ---
   if (autotrackingEnabled) {
     unsigned long currentMillis = millis();
     
     if (!isScanning) {
-      if (currentMillis - lastScanCompleteTime >= 5000) { // Pauza de 5s intre scanari
+      if (currentMillis - lastScanCompleteTime >= 5000) { // 5s pause between scans
         isScanning = true;
         scanPan = 0;
         scanTilt = 0;
@@ -544,15 +538,15 @@ void loop() {
         bestTilt = 10;
         currentPan = scanPan;
         currentTilt = scanTilt;
-        servoWrite(0, gradeLaTicks(currentPan));
-        servoWrite(1, gradeLaTicks(currentTilt));
+        servoWrite(0, degreesToTicks(currentPan));
+        servoWrite(1, degreesToTicks(currentTilt));
         lastScanMoveTime = currentMillis;
       }
     } else {
-      if (currentMillis - lastScanMoveTime >= 150) { // 150ms per pas pt citire stabila si miscare mecanica
+      if (currentMillis - lastScanMoveTime >= 150) { // 150ms per step for stable reading and mechanical movement
         lastScanMoveTime = currentMillis;
         
-        // Citire senzor
+        // Sensor reading
         if (loxInitialized) {
           VL53L0X_RangingMeasurementData_t measure;
           lox.rangingTest(&measure, false);
@@ -565,31 +559,31 @@ void loop() {
           }
         }
         
-        // Miscare motoare
+        // Motor movement
         scanPan += scanPanDir;
         if (scanPan > 180 || scanPan < 0) {
           scanPanDir = -scanPanDir;
-          scanPan += scanPanDir; // Corectie pentru a ramane in 0-180
+          scanPan += scanPanDir; // Correction to stay within 0-180
           scanTilt += scanTiltStep;
           
-          if (scanTilt > 40) {
-            // Sfarsit scanare
+          if (scanTilt > 30) {
+            // End of scan
             isScanning = false;
-            autotrackingEnabled = false; // Opreste autotracking-ul complet
+            autotrackingEnabled = false; // Completely stop autotracking
             lastScanCompleteTime = currentMillis;
             
             if (minDistance == 8190) {
               currentPan = 110;
               currentTilt = 10;
             } else {
-              currentPan = bestPan;
+              currentPan = bestPan - 10;
               currentTilt = bestTilt;
             }
-            servoWrite(0, gradeLaTicks(currentPan));
-            servoWrite(1, gradeLaTicks(currentTilt));
-            Serial.printf("Sfarsit scanare. MinDist: %d, Pan: %d, Tilt: %d\n", minDistance, currentPan, currentTilt);
+            servoWrite(0, degreesToTicks(currentPan));
+            servoWrite(1, degreesToTicks(currentTilt));
+            Serial.printf("Finished scanning. MinDist: %d, Pan: %d, Tilt: %d\n", minDistance, currentPan, currentTilt);
             
-            // Anunta backend-ul
+            // Notify backend
             HTTPClient http;
             http.begin(autotrackingStatusUrl);
             http.addHeader("Content-Type", "application/json");
@@ -598,33 +592,33 @@ void loop() {
             http.end();
           } else {
             currentTilt = scanTilt;
-            servoWrite(1, gradeLaTicks(currentTilt));
+            servoWrite(1, degreesToTicks(currentTilt));
           }
         } else {
           currentPan = scanPan;
-          servoWrite(0, gradeLaTicks(currentPan));
+          servoWrite(0, degreesToTicks(currentPan));
         }
       }
     }
   }
 
-  // --- Procesare Senzor PIR ---
+  // --- PIR Sensor processing ---
   static unsigned long lastMotionDetectionTime = 0;
   if (motionDetected) {
     unsigned long currentMillis = millis();
-    // Verificam perioada de cooldown de 3 secunde (3000 ms)
+    // Check cooldown period (3s)
     if (currentMillis - lastMotionDetectionTime >= 3000) {
-      Serial.println("S-a detectat miscare! Trimit notificare catre backend...");
+      Serial.println("Motion detected! Notify backend...");
       notifyMotion();
       lastMotionDetectionTime = currentMillis;
     }
-    // Reseteaza mereu flag-ul pentru a astepta urmatoarea intrerupere
+    // reset flag and waut for the next interrupt
     motionDetected = false;
   }
 
   // Reconectare WiFi daca s-a deconectat
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi deconectat — reincerc...");
+    Serial.println("WiFi disconnected, retry...");
     connectWiFi();
     if (WiFi.status() != WL_CONNECTED) {
       delay(2000);
@@ -632,20 +626,19 @@ void loop() {
     }
   }
 
-  // Respecta intervalul de captura
   unsigned long now = millis();
   if (now - lastFrameTime < CAPTURE_INTERVAL_MS) {
-    delay(1); // pauza scurta 
+    delay(1); // short pause
     return;
   }
   lastFrameTime = now;
 
-  // Captura si trimite
+  // Take a picture and send it
   if (captureAndSendFrame()) {
     frameCount++;
   }
 
-  // Afiseaza FPS la fiecare 5 secunde
+  // Print FPS every 5 seconds
   if (now - fpsTimer >= 5000) {
     float fps = (float)frameCount / ((now - fpsTimer) / 1000.0);
     Serial.printf("FPS: %.1f\n", fps);

@@ -21,6 +21,7 @@ export function Auth() {
   const [registerUsername, setRegisterUsername] = useState("");
   const [registerPassword, setRegisterPassword] = useState("");
 
+  // Submits the login credentials to the backend API
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -30,7 +31,7 @@ export function Auth() {
         headers: {
           "Content-Type": "application/json",
         },
-        credentials: "include",
+        credentials: "include", // Ensure session cookies are sent and received
         body: JSON.stringify({
           username: loginUsername,
           password: loginPassword,
@@ -44,14 +45,16 @@ export function Auth() {
         return;
       }
 
+      // Store user info in localStorage for persistence and navigate to stream page
       localStorage.setItem("petcam_current_user", JSON.stringify(data.user));
-      toast.success(`Welcome back, ${data.user.name}! 🐾`);
+      toast.success(`Welcome back, ${data.user.name}!`);
       navigate("/camera");
     } catch {
       toast.error("Could not connect to server. Please try again!");
     }
   };
 
+  // Submits new user registration details to the backend API
   const handleRegister = async (e: React.FormEvent) => {
     e.preventDefault();
 
@@ -61,7 +64,7 @@ export function Auth() {
         headers: {
           "Content-Type": "application/json",
         },
-        credentials: "include",
+        credentials: "include", // Establish the session cookie on successful registration
         body: JSON.stringify({
           name: registerName,
           username: registerUsername,
@@ -76,8 +79,9 @@ export function Auth() {
         return;
       }
 
+      // Store session data and redirect to main stream page
       localStorage.setItem("petcam_current_user", JSON.stringify(data.user));
-      toast.success(`Welcome to PetCam, ${data.user.name}! 🎉`);
+      toast.success(`Welcome to PetCam, ${data.user.name}!`);
       navigate("/camera");
     } catch {
       toast.error("Could not connect to server. Please try again!");
@@ -105,7 +109,7 @@ export function Auth() {
           <h1 className="text-4xl font-bold bg-gradient-to-r from-pink-500 via-purple-500 to-blue-500 bg-clip-text text-transparent">
             PetCam
           </h1>
-          <p className="text-purple-600 mt-2">Keep an eye on your furry friends 🐾</p>
+          <p className="text-purple-600 mt-2">Keep an eye on your furry friends</p>
         </div>
 
         <Tabs defaultValue="login" className="w-full">
